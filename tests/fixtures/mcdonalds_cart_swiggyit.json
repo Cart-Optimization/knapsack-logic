@@ -1,0 +1,40 @@
+{
+  "_comment": "Real get_food_cart response captured 2026-06-13 (McDonald's, restaurantId 668678). Personal fields (delivery address, addressId, cart_id) redacted; pricing + offers blocks are verbatim real data — this is the authoritative coupon/bill shape SWIGGYIT surfaces through.",
+  "statusCode": 0,
+  "statusMessage": "CART_UPDATED_SUCCESSFULLY",
+  "data": {
+    "cart_id": 0,
+    "result": "success",
+    "restaurant": {"deliverySubtitle": "35-40 mins to <redacted address>"},
+    "items": [
+      {
+        "menu_item_id": 177650657,
+        "name": "McSpicy Premium Chicken Burger Protein Plus (2 Slices)",
+        "quantity": 1,
+        "is_veg": "2",
+        "subtotal": 325,
+        "total": 325,
+        "final_price": 245,
+        "in_stock": 1,
+        "variants": [],
+        "addons": [],
+        "valid_addons": []
+      }
+    ],
+    "item_count": 1,
+    "pricing": {
+      "item_total": 325,
+      "delivery_charge": 0,
+      "delivery_charge_strikeoff": 39,
+      "taxes_and_charges": 70.56,
+      "to_pay": 316
+    },
+    "offers": {
+      "coupon_applied": "SWIGGYIT",
+      "coupon_discount": 80,
+      "free_delivery_applied": true
+    }
+  },
+  "addressId": "<redacted>",
+  "availablePaymentMethods": ["Cash on Delivery"]
+}

@@ -24,6 +24,7 @@ Shapes we have NOT captured live are refused rather than guessed:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 from ..models import (
@@ -37,9 +38,11 @@ from ..models import (
 
 __all__ = [
     "SwiggyAdapterError",
+    "CartBill",
     "parse_menu",
     "parse_addon_groups",
     "parse_coupons",
+    "parse_cart_bill",
     "swiggy_id",
 ]
 
@@ -208,6 +211,69 @@ def parse_menu(
         return Menu(restaurant=str(restaurant), items=tuple(items), coupons=())
     except MenuError as exc:
         raise SwiggyAdapterError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class CartBill:
+    """Swiggy's authoritative bill for a built cart (read from get_food_cart).
+
+    ``to_pay`` is Swiggy's number and must be shown as-is — never recomputed
+    from our approximate fee model. ``coupon_code`` is None unless a coupon is
+    *actually* applied (a non-zero discount); Swiggy auto-applies the best
+    available coupon, so this is also how we learn which coupon won.
+    """
+
+    item_total: float
+    coupon_code: str | None
+    coupon_discount: float
+    free_delivery: bool
+    delivery_charge: float
+    taxes_and_charges: float
+    to_pay: float
+    item_count: int
+    cod_available: bool
+
+
+def parse_cart_bill(cart_response: Mapping[str, Any]) -> CartBill:
+    """Read the authoritative bill + applied coupon from a get_food_cart response.
+
+    A ``coupon_applied`` with ``coupon_discount == 0`` means Swiggy merely
+    *suggested* a coupon (not applied), so it is reported as no coupon.
+    """
+    if not isinstance(cart_response, Mapping):
+        raise SwiggyAdapterError("cart response must be a mapping")
+    data = cart_response.get("data")
+    if not isinstance(data, Mapping):
+        raise SwiggyAdapterError("cart response has no data block")
+    pricing = data.get("pricing")
+    if not isinstance(pricing, Mapping):
+        raise SwiggyAdapterError("cart response has no pricing block")
+    offers = data.get("offers") or {}
+
+    discount = offers.get("coupon_discount", 0) or 0
+    coupon_code = offers.get("coupon_applied")
+    if not discount or not coupon_code:  # suggested-but-not-applied, or none
+        coupon_code = None
+        discount = 0
+
+    payment_methods = cart_response.get("availablePaymentMethods") or []
+    cod_available = any("cash" in str(m).lower() for m in payment_methods)
+
+    return CartBill(
+        item_total=float(pricing.get("item_total", 0)),
+        coupon_code=coupon_code,
+        coupon_discount=float(discount),
+        free_delivery=bool(offers.get("free_delivery_applied", False)),
+        delivery_charge=float(pricing.get("delivery_charge", 0)),
+        taxes_and_charges=float(pricing.get("taxes_and_charges", 0)),
+        to_pay=float(pricing["to_pay"]) if "to_pay" in pricing else _missing_to_pay(),
+        item_count=int(data.get("item_count", len(data.get("items", [])))),
+        cod_available=cod_available,
+    )
+
+
+def _missing_to_pay() -> float:
+    raise SwiggyAdapterError("cart pricing has no to_pay (authoritative total)")
 
 
 def parse_coupons(coupons_response: Mapping[str, Any]) -> tuple:

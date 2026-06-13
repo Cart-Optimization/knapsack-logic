@@ -186,15 +186,37 @@ tools were ever called.
   `parse_coupons` STILL has no real API shape (endpoint stays empty); capturing
   it needs the cart-build path below (mutating, pending user approval).
 
+- [real-data round 3 — coupons live in the CART] GREEN: 408 passed.
+  BREAKTHROUGH on how coupons actually surface in this MCP:
+  - `fetch_food_coupons` returns `{}` for ALL 8 restaurants tried (incl. ones
+    advertising "50% OFF"/"₹125 OFF ABOVE ₹599", and incl. McDonald's where the
+    user provably has SWIGGYIT). It is NOT a usable discovery path here.
+  - The real coupon + authoritative bill live in `get_food_cart` →
+    `data.offers` (`coupon_applied`, `coupon_discount`, `free_delivery_applied`)
+    and `data.pricing` (`item_total`, `delivery_charge`+strikeoff,
+    `taxes_and_charges`, `to_pay`). Swiggy AUTO-APPLIES the best coupon for the
+    cart and reports the true discount.
+  - Captured real (read-only; the user already had a cart): McDonald's,
+    SWIGGYIT applied = **₹80 off + free delivery** (richer than the user's
+    "₹80 off" mental model), to_pay ₹316. Redacted fixture
+    `tests/fixtures/mcdonalds_cart_swiggyit.json`.
+  - Built `parse_cart_bill` (+ `CartBill`) TDD: reads to_pay as authoritative
+    (never recomputed), treats coupon_applied with discount==0 as "suggested,
+    not applied" (per the tool's own note), flags COD availability. The user's
+    cart was left untouched.
+  - Real taxes (₹70.56) ≠ our 5% GST estimate → confirms the model only ranks;
+    Swiggy's `to_pay` is the number we must show.
+
 ## Next steps (in order)
 
-1. **Capture the real coupon API shape (needs approval):** the only way the
-   MCP reveals a cart-gated code like SWIGGYIT is to build a real ≥₹159 cart
-   (`update_food_cart`) and read it back (`apply_food_coupon`/`get_food_cart`).
-   That MUTATES the user's live Swiggy cart, so do it only with explicit
-   per-action approval, then flush. Save the payload as a fixture and shape
-   `parse_coupons` against it (it currently raises on non-empty). Until then,
-   user-described coupons work (see test_real_coupon_scenario).
+1. **Cart-verify flow (needs approval — MUTATES live cart):** the honest
+   "login+budget→options" path is: optimizer proposes a few strong candidate
+   carts (using hypothesized coupons to cross thresholds) → for each, build it
+   on Swiggy (`update_food_cart`) → read `parse_cart_bill` (Swiggy auto-applies
+   the best coupon incl. free delivery) → pick lowest `to_pay` → flush. Swiggy
+   does coupon selection, so we don't need to model every coupon rule. Requires
+   explicit per-action approval; NEVER `place_food_order`. `parse_coupons` from
+   the (empty) coupon endpoint stays a guard — the cart is the source of truth.
 2. **Capture a real variant shape:** a restaurant with `hasVariants:true`
    items (beverages elsewhere), then implement+test the variant path (it
    currently raises).
