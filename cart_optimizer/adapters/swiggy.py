@@ -219,8 +219,13 @@ class CartBill:
 
     ``to_pay`` is Swiggy's number and must be shown as-is — never recomputed
     from our approximate fee model. ``coupon_code`` is None unless a coupon is
-    *actually* applied (a non-zero discount); Swiggy auto-applies the best
-    available coupon, so this is also how we learn which coupon won.
+    *actually* applied (a non-zero discount).
+
+    NOTE (verified live 2026-06-13): a cart's ``offers.coupon_applied`` with
+    ``coupon_discount == 0`` is only a SUGGESTION — Swiggy does not auto-apply
+    it. The discount appears only after an explicit ``apply_food_coupon`` call,
+    and that can be refused by item restrictions. So a populated CartBill here
+    reflects a coupon that was explicitly applied, not an automatic best.
     """
 
     item_total: float

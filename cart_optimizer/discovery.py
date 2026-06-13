@@ -8,8 +8,13 @@ only an estimate. So we cannot trust a single estimated "best cart". Instead:
 1. ``propose_candidates`` generates a *diverse* set of plausible carts
    (anchored on different items) so they trigger different possible coupons.
 2. Each candidate is confirmed through a ``CartVerifier`` — in production the
-   live Swiggy cart (build → read bill → flush), which auto-applies the best
-   coupon and returns the authoritative ``to_pay``.
+   live Swiggy cart (build → explicitly apply each candidate coupon → read
+   bill → flush) and returns the authoritative ``to_pay``. NOTE (verified live
+   2026-06-13): Swiggy does NOT auto-apply coupons — the cart only *suggests*
+   one (``coupon_discount == 0``); a coupon must be applied explicitly, and it
+   can be rejected by item restrictions (SWIGGYIT: "not applicable on
+   pre-packaged & combo items"). So which coupon a cart can use is itself
+   something only the live cart can tell us.
 3. ``discover_best_cart`` keeps the highest-preference candidate whose REAL
    bill is within budget, ties broken by the lower real price.
 

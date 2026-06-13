@@ -207,16 +207,38 @@ tools were ever called.
   - Real taxes (₹70.56) ≠ our 5% GST estimate → confirms the model only ranks;
     Swiggy's `to_pay` is the number we must show.
 
+- [real-data round 4 — LIVE cart verification] Ran the discovery loop live
+  against the user's Swiggy account (explicit approval; cleared their cart; no
+  order placed). Two findings that overturn earlier assumptions:
+  1. **Coupons are NOT auto-applied.** A built cart only *suggests* a coupon
+     (`coupon_applied:"FLAT100", coupon_discount:0`). The discount appears only
+     after an explicit `apply_food_coupon` call. (Earlier docs claiming
+     auto-apply were corrected.)
+  2. **Coupons have item-level restrictions, discovered only on apply.**
+     SWIGGYIT on McAloo+McChicken (value burgers) → REJECTED: "Not applicable
+     on pre-packaged & combo items." SWIGGYIT on McSpicy Premium+McAloo →
+     applied −₹80 (came off the premium item, 269→189).
+  Real bills (authoritative): value pair McAloo+McChicken = **₹307 (no coupon)**;
+  premium pair McSpicy Premium+McAloo = **₹340 (SWIGGYIT −₹80)**. The coupon
+  cart LOSES — SWIGGYIT only unlocks on pricier items and even after ₹80 off
+  costs more than the no-coupon value pair. Unknowable without live probing.
+  Also: real taxes_and_charges (~₹70 on ~₹240–350) are far above our 5% GST
+  estimate — confirms the model only ranks; Swiggy `to_pay` is authoritative.
+  Live tools confirmed: `update_food_cart`, `apply_food_coupon`,
+  `flush_food_cart`, `get_food_cart`. Cart left empty after the run.
+
 ## Next steps (in order)
 
-1. **Cart-verify flow (needs approval — MUTATES live cart):** the honest
-   "login+budget→options" path is: optimizer proposes a few strong candidate
-   carts (using hypothesized coupons to cross thresholds) → for each, build it
-   on Swiggy (`update_food_cart`) → read `parse_cart_bill` (Swiggy auto-applies
-   the best coupon incl. free delivery) → pick lowest `to_pay` → flush. Swiggy
-   does coupon selection, so we don't need to model every coupon rule. Requires
-   explicit per-action approval; NEVER `place_food_order`. `parse_coupons` from
-   the (empty) coupon endpoint stays a guard — the cart is the source of truth.
+1. **Wire the live CartVerifier (needs approval — MUTATES live cart):** the
+   offline loop core (`discovery.py`) is built + tested. The live verifier per
+   candidate must: `flush_food_cart` → `update_food_cart(items)` → for each
+   candidate coupon code `apply_food_coupon` (catch rejections — item
+   restrictions are real) → `get_food_cart` → `parse_cart_bill`, keep the
+   lowest `to_pay`. Because coupons are NOT auto-applied and have hidden item
+   restrictions, the verifier must actively try coupon codes, and candidate
+   generation must include pricier items that can *unlock* restricted coupons
+   (the value-maximizing cheap cart may be coupon-ineligible). Requires
+   explicit per-action approval; NEVER `place_food_order`.
 2. **Capture a real variant shape:** a restaurant with `hasVariants:true`
    items (beverages elsewhere), then implement+test the variant path (it
    currently raises).
