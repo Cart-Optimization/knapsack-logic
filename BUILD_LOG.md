@@ -141,17 +141,54 @@ Full spec data model implemented and proven exact. Branch
 383 passed (~0.3s). DP == brute-force oracle on 200 in-suite + 2000 off-line
 random menus spanning the whole feature surface.
 
+## Real-data track: Swiggy adapter DONE (menu path)
+
+Swiggy MCP authenticated (the user ran `/mcp`). Captured live read-only data
+for McDonald's (restaurantId 668678) → Chandivali address via `get_addresses`
+(then user picked Home), `search_restaurants`, `get_restaurant_menu`,
+`search_menu` (burger + fries), `fetch_food_coupons`. NO order/cart-mutating
+tools were ever called.
+
+- [real-data round 1 — adapter] GREEN: 400 passed. Fixtures
+  `tests/fixtures/mcdonalds_{menu,search_addons}.json` (real, trimmed subsets;
+  see fixtures/README). `cart_optimizer/adapters/swiggy.py`:
+  - prefixes Swiggy bare-number ids into `itm_/var_/grp_/opt_`; `swiggy_id()`
+    inverse for later cart-building.
+  - `parse_menu` dedupes items across categories, rounds float prices to
+    rupees, derives preference from rating (+bestseller bump), maps inStock →
+    available, merges add-on detail from `search_menu` by item id.
+  - `parse_addon_groups`: maxAddons → max_select, min_select=0 (included
+    default already priced into the ₹0 choices), clamps max to option count.
+  - Refuses to GUESS uncaptured shapes: item `variantsV2/variations` →
+    SwiggyAdapterError; non-empty coupon payload → SwiggyAdapterError.
+  - End-to-end verified: parsed real McDonald's menu (7 items) → optimizer
+    picked McAloo Tikki + McChicken = ₹283.90 all-in @ pref 1.85 under ₹300.
+
+### Real-data findings that shaped the design
+- Swiggy ids are bare numbers; menu is paginated/compact (no variant/addon
+  detail) and the same item id recurs across categories → dedupe required.
+- This restaurant models sizes (Fries R/M/L) as SEPARATE items, so no
+  `variantsV2/variations` ever appeared — variant path is guarded, not built.
+- Prices carry paise (e.g. 171.57); DP needs int spend, model only ranks →
+  round to rupees (authoritative bill comes from Swiggy at confirm time).
+- `fetch_food_coupons` returned `{}` for McDonald's (coupons likely
+  cart-dependent) → real coupon shape still uncaptured.
+
 ## Next steps (in order)
 
-1. **Real-data track (blocked on user):** connect the Swiggy MCP server —
-   `claude mcp add --transport http swiggy-food https://mcp.swiggy.com/food`
-   then authenticate via /mcp. Once connected: list tools, fetch addresses →
-   search restaurants → pull one live menu, save raw JSON to
-   `tests/fixtures/`, write `cart_optimizer/adapters/swiggy.py` + tests.
-   NEVER call order-placement tools (COD-only, non-cancellable).
-2. Calibrate PricingConfig against a real Swiggy bill (read the bill of the
-   built cart via MCP; our model only ranks).
-3. Remaining deferred scope if needed: `item_count` coupon queries and
-   cart-minimum combo applicability (each adds a DP dimension), mixed
-   variants of one item in a cart.
+1. **Capture a real coupon shape:** find a restaurant/condition where
+   `fetch_food_coupons` returns a non-empty payload (or pass a `couponCode`),
+   save it as a fixture, and implement `parse_coupons` against it (it
+   currently raises on non-empty). Until then live-menu optimization runs
+   coupon-free.
+2. **Capture a real variant shape:** a restaurant with `hasVariants:true`
+   items (beverages elsewhere), then implement+test the variant path (it
+   currently raises).
+3. **Cart-build path:** map an optimized cart back to Swiggy `update_food_cart`
+   calls via `swiggy_id()`, show the real bill for confirmation (read-only
+   until the user explicitly approves an order). NEVER auto-call
+   `place_food_order` (COD, non-cancellable).
+4. Calibrate PricingConfig (delivery/platform/GST) against a real Swiggy bill.
+5. Deferred engine scope if needed: `item_count` coupon queries, cart-minimum
+   combo applicability, mixed variants of one item.
 <!-- log-end -->

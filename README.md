@@ -65,16 +65,28 @@ Deliberately deferred (rejected at validation, not silently ignored):
 an extra DP dimension), and mixing several variants of the *same* item in one
 cart.
 
-## Real data (next step)
+## Real data (Swiggy MCP)
 
 The Swiggy MCP Food server is remote (`https://mcp.swiggy.com/food`, OAuth):
 
 ```bash
-claude mcp add --transport http swiggy-food https://mcp.swiggy.com/food
+claude mcp add --transport http swiggy-food https://mcp.swiggy.com/food   # then authenticate via /mcp
 ```
 
-Then capture one live menu response, write `adapters/swiggy.py` against it,
-and run the optimizer on the real menu. **Never call order-placement tools
-during testing — the server is COD-only and orders cannot be cancelled.**
-The internal fee model only ranks carts; the authoritative bill is read back
-from Swiggy before anything is shown for confirmation.
+`cart_optimizer/adapters/swiggy.py` maps live Swiggy responses
+(`get_restaurant_menu` + `search_menu`) into a `Menu`, shaped against real
+captured payloads in `tests/fixtures/` (McDonald's Mumbai). It prefixes
+Swiggy's bare numeric ids into the typed scheme, dedupes items across
+categories, rounds paise prices to rupees, and derives preference from the
+displayed rating. Shapes not yet seen live — item `variantsV2`/`variations`
+and non-empty coupon payloads — raise `SwiggyAdapterError` rather than being
+guessed.
+
+**Read-only by policy:** the adapter and capture flow only browse menus,
+restaurants, and coupons. **Order placement is never automated** — the Food
+server is COD-only and orders cannot be cancelled. The internal fee model
+only ranks carts; the authoritative bill is read back from Swiggy before
+anything is shown for confirmation.
+
+Still to capture: a non-empty coupon payload and a real variant payload (see
+`BUILD_LOG.md` → Next steps).
