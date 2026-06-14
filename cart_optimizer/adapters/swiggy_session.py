@@ -117,16 +117,15 @@ def cart_to_swiggy_items(cart: Cart) -> list[dict[str, Any]]:
     return items
 
 
-# Common Swiggy coupon codes to probe per cart. The list endpoint
-# (fetch_food_coupons) is useless (returns {} even with a cart), so the only way
-# to discover what a user can actually use is: (1) the coupon Swiggy AUTO-SUGGESTS
-# in the built cart (always tried, free) plus (2) blind-trying known codes. This
-# default is a seed; a real deployment maintains a per-user / per-area learned
-# list so no good coupon is ever missed. Codes observed live: SWIGGYIT (McD),
-# FLAT100 (BK), FLAT75 (Starbucks), FLAVORFUL (Taco Bell), DUOJOY/TRYNEW (suggested).
+# Small DISCOVERY seed list, used only on the first cart at a never-seen branch.
+# The real coupon almost always comes from (1) the coupon Swiggy AUTO-SUGGESTS for
+# the cart (its own best pick) and (2) this branch's ledger of codes proven before.
+# fetch_food_coupons is useless (returns {} even with a cart), so a tiny seed of
+# the most common high-value codes is all we blind-try — once per branch — to
+# bootstrap the shared ledger. Observed live: SWIGGYIT (McD), FLAT100 (BK),
+# FLAT75 (Starbucks), FLAVORFUL (Taco Bell).
 DEFAULT_COUPON_CANDIDATES: tuple[str, ...] = (
-    "SWIGGYIT", "FLAT100", "FLAT125", "FLAT75", "FLAT150", "FLAVORFUL",
-    "DUOJOY", "TRYNEW", "WELCOME", "SAVE50", "NEW100",
+    "SWIGGYIT", "FLAT100", "FLAT125", "FLAVORFUL", "TRYNEW",
 )
 
 

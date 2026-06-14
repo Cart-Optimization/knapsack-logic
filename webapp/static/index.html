@@ -56,13 +56,22 @@
   <div id="app" class="hidden">
     <div class="card">
       <label>Deliver to</label>
-      <select id="address"></select>
+      <div class="row">
+        <select id="address" onchange="loadNearby()"></select>
+        <button class="secondary" style="flex:0 0 170px" onclick="useMyLocation()">📍 Use my location</button>
+      </div>
+      <p id="geo" class="muted" style="margin:8px 0 0"></p>
+    </div>
+
+    <div id="nearbyCard" class="card hidden">
+      <label>Restaurants near you</label>
+      <div id="nearby"><p class="muted spin">Finding nearby restaurants…</p></div>
     </div>
 
     <div class="card">
-      <label>Find a restaurant</label>
+      <label>Or search by name</label>
       <div class="row">
-        <input id="q" placeholder="e.g. McDonald's, Burger King" />
+        <input id="q" placeholder="e.g. KFC, Domino's" />
         <button class="secondary" style="flex:0 0 90px" onclick="search()">Search</button>
       </div>
       <div id="results"></div>
@@ -93,9 +102,68 @@ async function boot() {
   else { $('login').classList.remove('hidden'); }
 }
 
+let addrCache = [];
+
 async function loadAddresses() {
-  const a = await fetch('/api/addresses').then(r => r.json());
-  $('address').innerHTML = a.map(x => `<option value="${x.id}">${x.label} — ${x.line}</option>`).join('');
+  addrCache = await fetch('/api/addresses').then(r => r.json());
+  $('address').innerHTML = addrCache
+    .map(x => `<option value="${x.id}">${x.label} — ${x.line}</option>`).join('');
+  if (addrCache.length) loadNearby();    // auto-show nearby for the default address
+}
+
+function restaurantRow(r) {
+  const dist = (r.distanceKm != null) ? `${r.distanceKm} km · ` : '';
+  return `
+    <div class="rest" onclick='pick(${JSON.stringify(JSON.stringify({id:r.id,name:r.name}))})'>
+      <div><b>${r.name}</b><small>${dist}${r.area || ''} · ★${r.rating ?? '–'} · ${r.etaMins ?? '–'} min</small></div>
+      <div class="muted">${r.offer || ''} ›</div>
+    </div>`;
+}
+
+async function loadNearby() {
+  const addressId = $('address').value; if (!addressId) return;
+  $('nearbyCard').classList.remove('hidden');
+  $('nearby').innerHTML = '<p class="muted spin">Finding nearby restaurants…</p>';
+  try {
+    const rs = await fetch(`/api/nearby?addressId=${addressId}`).then(r => r.json());
+    $('nearby').innerHTML = rs.length
+      ? rs.map(restaurantRow).join('')
+      : '<p class="muted">No supported restaurants deliver here right now.</p>';
+  } catch (e) { $('nearby').innerHTML = '<p class="err">Could not load nearby: ' + e + '</p>'; }
+}
+
+// Detect location → reverse-geocode for display → auto-pick the closest-matching
+// saved Swiggy address (delivery is address-based, so we map GPS onto a saved one).
+function useMyLocation() {
+  if (!navigator.geolocation) { $('geo').textContent = 'Geolocation not supported by this browser.'; return; }
+  $('geo').innerHTML = '<span class="spin">Detecting your location…</span>';
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    const { latitude, longitude } = pos.coords;
+    let locality = '';
+    try {
+      const g = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`).then(r => r.json());
+      locality = g.locality || g.city || g.principalSubdivision || '';
+    } catch (e) { /* reverse-geocode is best-effort */ }
+
+    // Try to match a saved address by locality text.
+    let matched = null;
+    if (locality) {
+      const lo = locality.toLowerCase();
+      matched = addrCache.find(a => (a.line || '').toLowerCase().includes(lo)
+                                 || (a.label || '').toLowerCase().includes(lo));
+    }
+    if (matched) {
+      $('address').value = matched.id;
+      $('geo').innerHTML = `📍 Detected <b>${locality}</b> → using saved address “${matched.label}”.`;
+    } else {
+      $('geo').innerHTML = locality
+        ? `📍 Detected <b>${locality}</b> — no saved Swiggy address there, using “${addrCache[0]?.label||'first'}”. (Swiggy delivers to saved addresses only.)`
+        : `📍 Location detected — using your saved address.`;
+    }
+    loadNearby();
+  }, (err) => {
+    $('geo').innerHTML = `<span class="err">Couldn’t get location (${err.message}).</span> Pick an address above instead.`;
+  }, { enableHighAccuracy: true, timeout: 10000 });
 }
 
 async function search() {
@@ -104,12 +172,9 @@ async function search() {
   $('results').innerHTML = '<p class="muted spin">Searching…</p>';
   const rs = await fetch(`/api/restaurants?q=${encodeURIComponent(q)}&addressId=${addressId}`)
                     .then(r => r.json());
-  if (!rs.length) { $('results').innerHTML = '<p class="muted">No open restaurants found.</p>'; return; }
-  $('results').innerHTML = rs.map(r => `
-    <div class="rest" onclick='pick(${JSON.stringify(JSON.stringify({id:r.id,name:r.name}))})'>
-      <div><b>${r.name}</b><small>${r.area || ''} · ★${r.rating ?? '–'} · ${r.etaMins ?? '–'} min</small></div>
-      <div class="muted">${r.offer || ''} ›</div>
-    </div>`).join('');
+  $('results').innerHTML = rs.length
+    ? rs.map(restaurantRow).join('')
+    : '<p class="muted">No open restaurants found.</p>';
 }
 
 function pick(s) {

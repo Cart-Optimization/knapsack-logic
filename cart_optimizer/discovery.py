@@ -38,7 +38,38 @@ __all__ = [
     "VerifiedCart",
     "discover_best_cart",
     "propose_candidates",
+    "scale_menu_costs",
 ]
+
+
+def scale_menu_costs(menu: Menu, factor: float) -> Menu:
+    """Return a copy of the menu with every price multiplied by ``factor``.
+
+    Swiggy charges item-level-discounted prices (e.g. Taco Bell "ITEMS AT ₹29"),
+    so the list prices in the menu over-state the real cost. After one live cart
+    reveals the real-vs-listed ratio, we scale the whole menu by it and re-optimize
+    so the cart fills the *real* budget instead of stopping early."""
+    f = max(0.01, factor)
+
+    def sv(v):
+        return dataclasses.replace(v, cost=max(0, round(v.cost * f)))
+
+    def so(o):
+        return dataclasses.replace(o, cost=max(0, round(o.cost * f)))
+
+    def sg(g):
+        return dataclasses.replace(g, options=tuple(so(o) for o in g.options))
+
+    def si(i):
+        return dataclasses.replace(
+            i, variants=tuple(sv(v) for v in i.variants),
+            addons=tuple(sg(g) for g in i.addons),
+        )
+
+    items = tuple(si(i) for i in menu.items)
+    combos = tuple(dataclasses.replace(c, cost=max(0, round(c.cost * f)))
+                   for c in menu.combos)
+    return dataclasses.replace(menu, items=items, combos=combos)
 
 
 class CartVerifier(Protocol):

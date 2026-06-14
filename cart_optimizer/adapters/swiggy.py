@@ -75,7 +75,61 @@ def _round_price(value: Any, what: str) -> int:
     return rupees
 
 
-def _preference(item: Mapping[str, Any]) -> float:
+# Sides / desserts / add-ons that people add AFTER the main dish, not instead of
+# it. We down-weight these so the optimizer fills the cart with the restaurant's
+# actual mains first (tacos at Taco Bell, burgers at McD, drinks at a cafe) and
+# only adds these to use up leftover budget. Matched against item name + the
+# Swiggy category title — restaurant-agnostic (we don't down-weight by "the main
+# thing", we down-weight clear accompaniments).
+SIDE_KEYWORDS = (
+    "twist", "hash brown", "nachos", "fries", "wedge", "wedges", "dip",
+    "spice mix", "seasoning", "add-on", "addon",
+)
+DESSERT_KEYWORDS = (
+    "sundae", "cake", "churro", "cookie", "mousse", "brownie", "ice cream",
+    "pastry", "dessert", "sweet", "kitkat", "fusion",
+)
+SIDE_CATEGORY_HINTS = ("side", "add on", "add-on", "snack")
+# Generic soft drinks (down-weighted as sides at FOOD places, but NOT cafe drinks
+# like latte/coffee/shake — those stay full-weight so a cafe's mains survive).
+DRINK_KEYWORDS = ("coke", "pepsi", "thums up", "sprite", "fanta", "cola",
+                  "soft drink", "mineral water", "soda", "aerated")
+BEVERAGE_CATEGORY_HINTS = ("beverage", "drink", "cold drink")
+# If the restaurant's PRIMARY cuisine is one of these, drinks ARE the main event
+# (Starbucks etc.), so we don't down-weight them.
+BEVERAGE_LED_CUISINES = {"beverages", "cafe", "coffee", "juices", "tea",
+                         "bakery", "desserts", "ice cream", "bubble tea"}
+SIDE_WEIGHT = 0.45      # how much a side counts vs a main of the same rating
+DESSERT_WEIGHT = 0.40
+
+
+def is_beverage_led(cuisines: Iterable[str]) -> bool:
+    """True if this restaurant's main offering is drinks (so don't down-weight them)."""
+    cuisines = [str(c).lower() for c in (cuisines or [])]
+    return bool(cuisines) and cuisines[0] in BEVERAGE_LED_CUISINES
+
+
+def _relevance_weight(name: str, category: str = "", beverage_is_main: bool = False) -> float:
+    """1.0 for mains; lower for sides/desserts/drinks so mains are chosen first.
+
+    Restaurant-agnostic: we classify ACCOMPANIMENTS (not 'the main'), so burgers
+    at McD, pizzas at Domino's, tacos at Taco Bell all stay full-weight without
+    any per-store config. Beverages are the one ambiguous class — handled via the
+    restaurant's cuisine (drinks are mains at a cafe, sides at a food place)."""
+    cat = category.lower()
+    text = f"{name} {cat}".lower()
+    if any(k in text for k in DESSERT_KEYWORDS):
+        return DESSERT_WEIGHT
+    if any(k in text for k in SIDE_KEYWORDS) or any(h in cat for h in SIDE_CATEGORY_HINTS):
+        return SIDE_WEIGHT
+    is_drink = any(k in text for k in DRINK_KEYWORDS) or any(h in cat for h in BEVERAGE_CATEGORY_HINTS)
+    if is_drink and not beverage_is_main:
+        return SIDE_WEIGHT
+    return 1.0
+
+
+def _preference(item: Mapping[str, Any], category: str = "",
+                beverage_is_main: bool = False) -> float:
     rating = item.get("rating")
     if rating in (None, ""):
         score = DEFAULT_PREFERENCE
@@ -86,6 +140,7 @@ def _preference(item: Mapping[str, Any]) -> float:
             score = DEFAULT_PREFERENCE
     if item.get("isBestseller"):
         score += BESTSELLER_BONUS
+    score *= _relevance_weight(str(item.get("name", "")), category, beverage_is_main)
     return round(max(0.0, min(1.0, score)), 2)
 
 
@@ -317,6 +372,8 @@ def _parse_item(
     addons_by_id: Mapping[str, list[Mapping[str, Any]]],
     variations_by_id: Mapping[str, list[Mapping[str, Any]]],
     variantsv2_by_id: Mapping[str, list[Mapping[str, Any]]] = {},
+    category_title: str = "",
+    beverage_is_main: bool = False,
 ) -> Item:
     try:
         raw_id = str(raw["id"])
@@ -325,6 +382,7 @@ def _parse_item(
 
     base_cost = _round_price(raw.get("price"), f"item {raw_id}")
     addon_detail = addons_by_id.get(raw_id, [])
+    pref = _preference(raw, category_title, beverage_is_main)  # down-weights sides/desserts/drinks
 
     # Resolve variant detail: prefer variantsV2 (BK/newer), else legacy variations
     # (Starbucks). Detail comes from search_menu (merged in by id) or, for tests,
@@ -356,7 +414,7 @@ def _parse_item(
             return Item(
                 id=f"itm_{raw_id}",
                 name=str(raw.get("name", raw_id)),
-                preference=_preference(raw),
+                preference=pref,
                 variants=parsed_variants,
                 available=bool(raw.get("inStock", 1)),
                 addons=all_addons,
@@ -369,7 +427,7 @@ def _parse_item(
         return Item(
             id=f"itm_{raw_id}",
             name=str(raw.get("name", raw_id)),
-            preference=_preference(raw),
+            preference=pref,
             variants=(Variant(id=f"var_{raw_id}", name="Standard", cost=base_cost),),
             available=bool(raw.get("inStock", 1)),
             addons=parse_addon_groups(addon_detail),
@@ -396,7 +454,9 @@ def parse_menu(
     categories = menu_response.get("categories")
     if not categories:
         raise SwiggyAdapterError("menu response has no categories")
-    restaurant = (menu_response.get("restaurant") or {}).get("name", "unknown")
+    restaurant_obj = menu_response.get("restaurant") or {}
+    restaurant = restaurant_obj.get("name", "unknown")
+    beverage_is_main = is_beverage_led(restaurant_obj.get("cuisines") or [])
     search_list = list(search_responses)
     addons_by_id = _addons_by_item_id(search_list)
     variations_by_id = _variations_by_item_id(search_list)
@@ -406,13 +466,16 @@ def parse_menu(
     seen: set[str] = set()
     skipped = 0
     for category in categories:
+        cat_title = str(category.get("title", ""))
         for raw in category.get("items", []):
             raw_id = raw.get("id")
             if raw_id is None or str(raw_id) in seen:
                 continue
             seen.add(str(raw_id))
             try:
-                items.append(_parse_item(raw, addons_by_id, variations_by_id, variantsv2_by_id))
+                items.append(_parse_item(raw, addons_by_id, variations_by_id,
+                                         variantsv2_by_id, category_title=cat_title,
+                                         beverage_is_main=beverage_is_main))
             except SwiggyAdapterError as exc:
                 if not skip_unparseable:
                     raise

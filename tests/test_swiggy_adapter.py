@@ -87,6 +87,57 @@ def test_preference_derived_from_rating_and_bestseller(menu_response):
     assert 0.0 <= mcaloo.preference <= 1.0
 
 
+def test_sides_and_desserts_are_downweighted_vs_mains():
+    # Same rating, but a taco (main) must outrank a twist (side) and a sundae (dessert).
+    items = [
+        {"id": "1", "name": "Crunchy Taco", "price": 90, "inStock": 1, "rating": "4.4"},
+        {"id": "2", "name": "Cinnamon Twist", "price": 74, "inStock": 1, "rating": "4.4"},
+        {"id": "3", "name": "Choco Sundae", "price": 80, "inStock": 1, "rating": "4.4"},
+    ]
+    menu = parse_menu({"restaurant": {"name": "r"}, "categories": [
+        {"title": "Tacos", "items": [items[0]]},
+        {"title": "Sides", "items": [items[1]]},
+        {"title": "Desserts", "items": [items[2]]},
+    ]})
+    pref = {i.name: i.preference for i in menu.items}
+    assert pref["Crunchy Taco"] > pref["Cinnamon Twist"]
+    assert pref["Crunchy Taco"] > pref["Choco Sundae"]
+
+
+def test_drinks_are_sides_at_a_food_place():
+    menu = parse_menu({"restaurant": {"name": "McD", "cuisines": ["Burgers", "Beverages"]},
+        "categories": [{"title": "Menu", "items": [
+            {"id": "1", "name": "McChicken Burger", "price": 159, "inStock": 1, "rating": "4.4"},
+            {"id": "2", "name": "Coke", "price": 99, "inStock": 1, "rating": "4.4"}]}]})
+    pref = {i.name: i.preference for i in menu.items}
+    assert pref["McChicken Burger"] > pref["Coke"]   # drink down-weighted at a burger place
+
+
+def test_drinks_are_mains_at_a_cafe():
+    menu = parse_menu({"restaurant": {"name": "Starbucks", "cuisines": ["Beverages", "Cafe"]},
+        "categories": [
+            {"title": "Hot Coffees", "items": [
+                {"id": "1", "name": "Caffe Latte", "price": 295, "inStock": 1, "rating": "4.4"}]},
+            {"title": "Desserts", "items": [
+                {"id": "2", "name": "Chocolate Cake", "price": 295, "inStock": 1, "rating": "4.4"}]}]})
+    pref = {i.name: i.preference for i in menu.items}
+    assert pref["Caffe Latte"] > pref["Chocolate Cake"]   # drink IS the main at a cafe
+
+
+def test_optimizer_prefers_mains_over_sides_within_budget():
+    # Given equal ratings, the cart should pick the taco, not two cheaper sides.
+    menu = parse_menu({"restaurant": {"name": "Taco Bell"}, "categories": [
+        {"title": "Tacos", "items": [
+            {"id": "10", "name": "Crunchy Taco", "price": 99, "inStock": 1, "rating": "4.4"}]},
+        {"title": "Sides", "items": [
+            {"id": "20", "name": "Potato Twist", "price": 79, "inStock": 1, "rating": "4.5"},
+            {"id": "21", "name": "Nachos", "price": 79, "inStock": 1, "rating": "4.5"}]},
+    ]})
+    res = best_cart(menu, User(), PricingConfig(delivery_fee=0, platform_fee=0, gst_rate=0), budget=120)
+    names = {l.item.name for l in res.cart.lines}
+    assert "Crunchy Taco" in names   # main chosen despite sides being cheaper/equal-rated
+
+
 def test_missing_rating_gets_default_preference():
     item = {"id": "1", "name": "x", "price": 50, "inStock": 1}
     menu = parse_menu({"restaurant": {"name": "r"}, "categories": [

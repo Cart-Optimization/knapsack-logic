@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from typing import Any
@@ -56,14 +57,48 @@ class SwiggyClient:
             await self._exit_stack.aclose()
 
     async def call(self, tool_name: str, **kwargs: Any) -> Any:
-        """Call a Swiggy MCP tool, return the parsed JSON result."""
+        """Call a Swiggy MCP tool, return the parsed JSON result.
+
+        Handles the shapes seen live: structured output (preferred), a JSON
+        string in the first text block, and double-encoded JSON (a JSON string
+        whose value is itself a JSON document)."""
         if self._session is None:
             raise SwiggyClientError("not inside an async with block")
-        result = await self._session.call_tool(tool_name, arguments=kwargs)
+
+        # Retry on Swiggy rate-limiting (429) with exponential backoff.
+        result = None
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                result = await self._session.call_tool(tool_name, arguments=kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001 — inspect message transport-agnostically
+                msg = str(exc)
+                if "429" in msg or "Too Many Requests" in msg:
+                    last_exc = exc
+                    await asyncio.sleep(1.5 * (2 ** attempt))  # 1.5s, 3s, 6s
+                    continue
+                raise
+        if result is None:
+            raise SwiggyClientError(f"{tool_name}: rate-limited after retries ({last_exc})")
         if result.isError:
             raise SwiggyClientError(f"{tool_name} returned error: {result.content}")
+
+        # Prefer the SDK's structured output when the tool provides it.
+        structured = getattr(result, "structuredContent", None)
+        if isinstance(structured, dict) and structured:
+            # Some servers wrap the payload as {"result": {...}}.
+            if set(structured.keys()) == {"result"}:
+                return structured["result"]
+            return structured
+
         text = result.content[0].text if result.content else "{}"
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
+        data: Any = text
+        for _ in range(2):  # unwrap up to one level of double-encoding
+            if not isinstance(data, str):
+                break
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                break
+        return data

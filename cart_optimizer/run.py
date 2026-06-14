@@ -170,47 +170,49 @@ async def _fetch_full_menu(client, restaurant_id: str, address_id: str) -> dict:
         if not merged:
             merged = {"restaurant": resp.get("restaurant", {}), "categories": []}
         all_categories.extend(resp.get("categories", []))
-        if not resp.get("hasMore") or page >= 6:   # cap at 6 pages (48 categories)
+        if not resp.get("hasMore") or page >= 4:   # cap pages (cheap items are early)
             break
         page += 1
     merged["categories"] = all_categories
     return merged
 
 
+# Limit concurrent read calls so we parallelize without bursting into Swiggy's 429.
+_READ_CONCURRENCY = 4
+
+
 async def _enrich_menu_detail(client, raw_menu, restaurant_id, address_id) -> list[dict]:
-    """For items flagged hasVariants/hasAddons, fetch search_menu detail so the
-    adapter can parse their variations/addons. Searches by each such item's name
-    (deduped). Returns the list of search_menu responses to feed parse_menu."""
+    """Fetch search_menu detail ONLY for variant items (others price fine from the
+    compact menu; addon detail is optional and unused by the optimizer). Runs the
+    searches concurrently with a small concurrency cap. Returns search responses."""
     names: list[str] = []
     seen: set[str] = set()
     for cat in raw_menu.get("categories", []):
         for item in cat.get("items", []):
-            if (item.get("hasVariants") or item.get("hasAddons")):
+            if item.get("hasVariants"):   # only variants NEED enrichment to be orderable
                 name = str(item.get("name", "")).strip()
                 key = name.lower()
                 if name and key not in seen:
                     seen.add(key)
                     names.append(name)
-
     if not names:
         return []
 
-    print(f"  enriching {len(names)} variant/addon items via search...")
-    responses: list[dict] = []
-    for name in names[:40]:   # cap searches to bound call volume
-        try:
-            resp = await client.call(
-                "search_menu",
-                query=name,
-                addressId=address_id,
-                restaurantIdOfAddedItem=restaurant_id,
-            )
-            responses.append(resp)
-        except Exception:
-            pass
-    if len(names) > 40:
-        print(f"  (note: {len(names) - 40} variant/addon items not enriched — search cap)")
-    return responses
+    names = names[:30]
+    sem = asyncio.Semaphore(_READ_CONCURRENCY)
+
+    async def one(name: str):
+        async with sem:
+            try:
+                return await client.call(
+                    "search_menu", query=name, addressId=address_id,
+                    restaurantIdOfAddedItem=restaurant_id,
+                )
+            except Exception:  # noqa: BLE001
+                return None
+
+    results = await asyncio.gather(*[one(n) for n in names])
+    return [r for r in results if r]
 
 
 # ── main runner ───────────────────────────────────────────────────────────────
