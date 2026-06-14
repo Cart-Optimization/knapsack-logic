@@ -24,6 +24,7 @@ Shapes we have NOT captured live are refused rather than guessed:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -326,10 +327,16 @@ def _parse_item(
 def parse_menu(
     menu_response: Mapping[str, Any],
     search_responses: Iterable[Mapping[str, Any]] = (),
+    skip_unparseable: bool = False,
 ) -> Menu:
     """Build a Menu from a ``get_restaurant_menu`` response, merging add-on
     and variation detail from any ``search_menu`` responses.
-    Items are deduped by id across categories (first occurrence wins)."""
+    Items are deduped by id across categories (first occurrence wins).
+
+    ``skip_unparseable=True`` skips items the adapter can't yet handle (e.g. a
+    variant item with no captured ``search_menu`` detail) instead of raising,
+    emitting a ``warnings.warn`` per skip so nothing is silently dropped. Used
+    by the live runner, which can't guarantee detail for every menu item."""
     if not isinstance(menu_response, Mapping):
         raise SwiggyAdapterError("menu response must be a mapping")
     categories = menu_response.get("categories")
@@ -342,15 +349,25 @@ def parse_menu(
 
     items: list[Item] = []
     seen: set[str] = set()
+    skipped = 0
     for category in categories:
         for raw in category.get("items", []):
             raw_id = raw.get("id")
             if raw_id is None or str(raw_id) in seen:
                 continue
             seen.add(str(raw_id))
-            items.append(_parse_item(raw, addons_by_id, variations_by_id))
+            try:
+                items.append(_parse_item(raw, addons_by_id, variations_by_id))
+            except SwiggyAdapterError as exc:
+                if not skip_unparseable:
+                    raise
+                skipped += 1
+                warnings.warn(f"skipped menu item {raw_id}: {exc}", stacklevel=2)
     if not items:
-        raise SwiggyAdapterError("menu response contained no items")
+        raise SwiggyAdapterError(
+            "menu response contained no parseable items"
+            + (f" ({skipped} skipped)" if skipped else "")
+        )
     try:
         return Menu(restaurant=str(restaurant), items=tuple(items), coupons=())
     except MenuError as exc:

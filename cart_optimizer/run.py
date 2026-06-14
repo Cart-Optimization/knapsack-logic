@@ -139,6 +139,70 @@ def _print_bill(bill) -> None:
     print(f"  Taxes:     ₹{bill.taxes_and_charges:.0f}")
 
 
+# ── menu fetching (pagination + variant/addon enrichment) ─────────────────────
+
+async def _fetch_full_menu(client, restaurant_id: str, address_id: str) -> dict:
+    """Page through get_restaurant_menu and merge all categories into one dict.
+
+    A single call returns only the first page of categories (and trims items
+    within large categories). We follow ``hasMore`` to collect everything."""
+    merged: dict = {}
+    all_categories: list = []
+    page = 1
+    while True:
+        resp = await client.call(
+            "get_restaurant_menu",
+            restaurantId=restaurant_id,
+            addressId=address_id,
+            page=page,
+            pageSize=8,
+        )
+        if not merged:
+            merged = {"restaurant": resp.get("restaurant", {}), "categories": []}
+        all_categories.extend(resp.get("categories", []))
+        if not resp.get("hasMore") or page >= 6:   # cap at 6 pages (48 categories)
+            break
+        page += 1
+    merged["categories"] = all_categories
+    return merged
+
+
+async def _enrich_menu_detail(client, raw_menu, restaurant_id, address_id) -> list[dict]:
+    """For items flagged hasVariants/hasAddons, fetch search_menu detail so the
+    adapter can parse their variations/addons. Searches by each such item's name
+    (deduped). Returns the list of search_menu responses to feed parse_menu."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for cat in raw_menu.get("categories", []):
+        for item in cat.get("items", []):
+            if (item.get("hasVariants") or item.get("hasAddons")):
+                name = str(item.get("name", "")).strip()
+                key = name.lower()
+                if name and key not in seen:
+                    seen.add(key)
+                    names.append(name)
+
+    if not names:
+        return []
+
+    print(f"  enriching {len(names)} variant/addon items via search...")
+    responses: list[dict] = []
+    for name in names[:40]:   # cap searches to bound call volume
+        try:
+            resp = await client.call(
+                "search_menu",
+                query=name,
+                addressId=address_id,
+                restaurantIdOfAddedItem=restaurant_id,
+            )
+            responses.append(resp)
+        except Exception:
+            pass
+    if len(names) > 40:
+        print(f"  (note: {len(names) - 40} variant/addon items not enriched — search cap)")
+    return responses
+
+
 # ── main runner ───────────────────────────────────────────────────────────────
 
 async def run(
@@ -171,10 +235,13 @@ async def run(
             )
             print(f"Using address: {label}  (id={address_id})\n")
 
-        # 2. Menu
+        # 2. Menu — paginate all categories, enrich variant/addon detail via search.
         print(f"Fetching menu for restaurant {restaurant_id}...")
-        raw_menu = await client.call("get_restaurant_menu", restaurantId=restaurant_id)
-        menu = parse_menu(raw_menu)
+        raw_menu = await _fetch_full_menu(client, restaurant_id, address_id)
+        search_responses = await _enrich_menu_detail(
+            client, raw_menu, restaurant_id, address_id
+        )
+        menu = parse_menu(raw_menu, search_responses=search_responses, skip_unparseable=True)
         print(f"Menu: {menu.restaurant} — {len(menu.items)} items\n")
 
         # 3. Candidates

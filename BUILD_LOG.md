@@ -283,7 +283,55 @@ tools were ever called.
   - Fixture: tests/fixtures/starbucks_latte_search.json (real trimmed data).
   - 8 new variant tests + 2 cart_to_swiggy_items tests.
 
-## Status: FULL STACK COMPLETE ✅
+- [round 8 — LIVE QA across 4 restaurants @ ₹300/400/500] Ran the pipeline
+  live against the user's real Swiggy account (Chandivali/Home addr 120174612;
+  explicit approval; cart flushed clean after; NEVER place_food_order).
+  Validated end-to-end on real data and found/fixed a real optimizer bug.
+
+  PIPELINE VALIDATED LIVE:
+  - get_restaurant_menu shape matches parse_menu (restaurant.name +
+    categories[].items[]). Pagination confirmed (hasMore; only 8/15 cats/page).
+  - parse_menu deduped 20 raw McD items → 16 unique (cross-category overlaps).
+  - build → base bill → apply_coupon → authoritative bill → flush all work.
+  - Coupon REJECT handling: SWIGGYIT on McChicken+McAloo → "Not applicable on
+    pre-packaged & combo items" (caught, falls back to base bill).
+  - Coupon SUCCESS: SWIGGYIT −80 on McSpicy Premium (premium-gated).
+  - VARIANT BUILD validated live (Starbucks): encoded variants → Swiggy
+    variants pairs accepted; Caffe Latte resolved HOT TALL (+₹35) + Regular milk.
+
+  REAL BUG FOUND + FIXED: our fee estimate (~₹50) is far below real McD
+  overhead (~₹60 fixed + ~4%, ≈₹69 on ₹238), so propose_candidates anchored on
+  carts that bust the REAL budget and MISSED the truly-optimal feasible cart
+  (2× ₹79 burgers = ₹223 fit ₹300; the estimated "best" McChicken+McAloo = ₹307
+  did not). Fix: propose_candidates now also probes best_cart at 0.8/0.65/0.5×
+  budget so feasible cheaper carts are always candidates. Default max_candidates
+  5→8. 431 tests still green.
+
+  KEY PRODUCT FINDING — coupons are per-restaurant + cart-gated, auto-surfaced:
+  each restaurant suggested a DIFFERENT coupon in the built cart, confirming the
+  "discover via cart" thesis. SWIGGYIT (McD, premium-gated, −80),
+  FLAT100 (BK, value-wide, −99), FLAT75 (Starbucks, −75),
+  FLAVORFUL (Taco Bell, −124). Real fees vary wildly (BK tax ~₹42 vs McD ~₹69
+  on same ₹238) → must use authoritative to_pay, never estimate.
+
+  variantsV2 (BK/many) is NOW CAPTURED but NOT implemented (mandatory-addon
+  groups make live build risky) → adapter raises; runner skip-mode skips them.
+  BK matrix used non-variant items. NEXT GAP to implement.
+
+  RESULT MATRIX (real authoritative to_pay; preference = sum of item scores):
+  | Restaurant | ₹300 | ₹400 | ₹500 |
+  |---|---|---|---|
+  | McDonald's | McAloo+Mexican McAloo ₹223 (no coupon, 2 items) | McChicken+McAloo+Mexican ₹390 (3 items) | McChicken+McAloo+McChicken Double ₹495 (3 items) |
+  | Burger King | CrispyVegDbl+CrispyChkDbl+PizzaPuff ₹235 (FLAT100, 3) | +Nuggets ~₹386 (FLAT100, 4)* | +Whopper Chk XL ₹465 (FLAT100, 4) |
+  | Starbucks | 1 SHORT latte ~₹272 (FLAT75)* | 1 GRANDE/premium drink ~₹358 (FLAT75)* | 1 VENTI/premium drink ~₹405 (FLAT75)* |
+  | Taco Bell | 3 tacos ₹223 (FLAVORFUL −124) | ~5 tacos*, FLAVORFUL | ~6 tacos*, FLAVORFUL |
+  (* = derived from verified economics, not individually re-verified live to
+  conserve session context; all non-* cells are real verified bills.)
+
+  McD insight: SWIGGYIT (premium-gated) never wins — value items give more
+  preference per rupee. Starbucks: drinks ₹295+ so even ₹500 fits ~1 drink.
+
+## Status: FULL STACK COMPLETE ✅ + LIVE-VALIDATED on 4 restaurants
 
 Engine + live verifier + end-to-end runner on branch `cart-optimizer-engine`.
 Suite: 423 passed (~0.33s).
