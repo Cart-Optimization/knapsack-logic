@@ -69,12 +69,14 @@ async def _verify_one(
     restaurant_name: str,
     address_id: str,
     coupons: list[str],
+    ledger=None,
 ) -> "CartBill":  # noqa: F821
     """Verify one candidate cart against Swiggy's live bill.
 
-    Build the cart ONCE, then probe the auto-SUGGESTED coupon ∪ the candidate
-    list by applying each in place (no rebuild → far fewer calls). Returns the
-    bill with the lowest to_pay across no-coupon and all coupon attempts.
+    Build the cart ONCE, then probe branch-known ∪ auto-SUGGESTED ∪ candidate
+    coupons in place (no rebuild → far fewer calls). Records which codes worked
+    at this branch (restaurant_id) back into the ledger. Returns the bill with
+    the lowest to_pay across no-coupon and all coupon attempts.
     """
     from .adapters.swiggy import CartBill
     from .adapters.swiggy_session import _suggested_coupon
@@ -100,18 +102,24 @@ async def _verify_one(
     bills.append(parse_cart_bill(raw))
     suggested = _suggested_coupon(raw)
 
-    # suggested first, then candidates (deduped, order-preserving).
+    # Order: branch-known (most likely valid) → suggested → generic candidates.
+    branch_known = ledger.known(restaurant_id) if ledger else []
     codes: list[str] = []
-    for c in ([suggested] if suggested else []) + list(coupons):
+    for c in branch_known + ([suggested] if suggested else []) + list(coupons):
         if c and c not in codes:
             codes.append(c)
 
     for code in codes:
         try:
             await client.call("apply_food_coupon", couponCode=code, addressId=address_id)
-            bills.append(parse_cart_bill(await get_raw()))
+            bill = parse_cart_bill(await get_raw())
+            bills.append(bill)
+            if ledger is not None:
+                worked = bill.coupon_code == code and bill.coupon_discount > 0
+                ledger.record(restaurant_id, code, bill.coupon_discount if worked else 0)
         except (SwiggyClientError, SwiggyAdapterError, Exception):
-            pass  # rejected or error — skip
+            if ledger is not None:
+                ledger.record(restaurant_id, code, 0)  # missed
 
     await client.call("flush_food_cart")
     return min(bills, key=lambda b: b.to_pay)
@@ -253,6 +261,16 @@ async def run(
         print(f"Proposed {len(candidates)} candidate carts to probe.\n")
 
         # 4. Live verification (fully async — no nested event-loop issues)
+        #    Per-branch coupon ledger: codes proven at THIS restaurant_id are
+        #    tried first and successes are saved, so repeat orders from the same
+        #    branch rarely miss a coupon and probe fewer dead codes over time.
+        from .coupon_ledger import JsonCouponLedger
+        ledger = JsonCouponLedger(TOKEN_FILE.parent / "coupons.json")
+        known = ledger.known(restaurant_id)
+        if known:
+            print(f"Branch {restaurant_id} has {len(known)} remembered coupon(s): "
+                  f"{', '.join(known)}")
+
         print("Verifying each candidate live on Swiggy...")
         print("(Cart is flushed after each probe — no order is placed)\n")
 
@@ -262,7 +280,8 @@ async def run(
             print(f"  [{i}/{len(candidates)}] {names}")
             try:
                 bill = await _verify_one(
-                    cart, client, restaurant_id, menu.restaurant, address_id, coupons
+                    cart, client, restaurant_id, menu.restaurant, address_id,
+                    coupons, ledger=ledger,
                 )
                 suffix = (
                     f"  (coupon: {bill.coupon_code}  -₹{bill.coupon_discount:.0f})"

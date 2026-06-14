@@ -155,9 +155,13 @@ class SwiggySessionVerifier:
 
     Args:
         ops:           Injected MCP callables (real or mock).
-        restaurant_id: Swiggy restaurant id (bare number, e.g. "668678").
+        restaurant_id: Swiggy restaurant id (= the BRANCH; coupons are keyed on it).
         address_id:    Swiggy address id for delivery charge calculation.
         coupon_codes:  Candidate codes to try (default DEFAULT_COUPON_CANDIDATES).
+        ledger:        Optional per-branch CouponLedger. Codes known to work at
+                       this restaurant_id are tried FIRST and successes are saved
+                       back, so repeat orders from the same branch rarely miss a
+                       coupon and probe fewer dead codes over time.
         rebuild_per_coupon: if True, flush+rebuild before each coupon (safest but
                        ~2x calls). Default False: apply coupons to the one built
                        cart (apply replaces the previous; rejections are skipped).
@@ -169,6 +173,7 @@ class SwiggySessionVerifier:
         restaurant_id: str,
         address_id: str,
         coupon_codes: list[str] | None = None,
+        ledger=None,
         rebuild_per_coupon: bool = False,
     ) -> None:
         self.ops = ops
@@ -178,10 +183,12 @@ class SwiggySessionVerifier:
             list(coupon_codes) if coupon_codes is not None
             else list(DEFAULT_COUPON_CANDIDATES)
         )
+        self.ledger = ledger
         self.rebuild_per_coupon = rebuild_per_coupon
 
     def verify(self, cart: Cart) -> CartBill:
-        """Build once, probe suggested ∪ candidate coupons, return the best bill."""
+        """Build once, probe branch-known ∪ suggested ∪ candidate coupons, return
+        the best bill, and persist which codes actually worked at this branch."""
         cart_items = cart_to_swiggy_items(cart)
         bills: list[CartBill] = []
 
@@ -191,9 +198,10 @@ class SwiggySessionVerifier:
         bills.append(parse_cart_bill(raw))
         suggested = _suggested_coupon(raw)
 
-        # Try suggested first, then the candidate list (deduped, order-preserving).
+        # Order: branch-known (most likely valid) → suggested → generic candidates.
+        branch_known = self.ledger.known(self.restaurant_id) if self.ledger else []
         codes: list[str] = []
-        for c in ([suggested] if suggested else []) + self.coupon_codes:
+        for c in branch_known + ([suggested] if suggested else []) + self.coupon_codes:
             if c and c not in codes:
                 codes.append(c)
 
@@ -202,9 +210,19 @@ class SwiggySessionVerifier:
                 if self.rebuild_per_coupon:
                     self._build(cart_items)
                 self.ops.apply_coupon(code, self.address_id)
-                bills.append(parse_cart_bill(self.ops.get_cart(self.address_id)))
+                bill = parse_cart_bill(self.ops.get_cart(self.address_id))
+                bills.append(bill)
+                # Record the outcome for this branch: a real discount means the
+                # code worked here; coupon_code is set only when discount > 0.
+                if self.ledger is not None:
+                    worked = bill.coupon_code == code and bill.coupon_discount > 0
+                    self.ledger.record(
+                        self.restaurant_id, code,
+                        bill.coupon_discount if worked else 0,
+                    )
             except (CouponRejected, SwiggyAdapterError, Exception):
-                pass  # rejected or error — skip, try next
+                if self.ledger is not None:
+                    self.ledger.record(self.restaurant_id, code, 0)  # missed
 
         self.ops.flush()
         return min(bills, key=lambda b: b.to_pay)

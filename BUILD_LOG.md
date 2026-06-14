@@ -350,6 +350,21 @@ tools were ever called.
     coupon=True opt-in safety mode. run.py._verify_one mirrors this; --coupons
     defaults to the candidate list, suggestion always added on top.
 
+- [round 10 — per-branch coupon ledger] GREEN: 448 passed.
+  Insight: a Swiggy restaurantId IS the branch, and coupons are issued per
+  branch, so a code that worked at a branch ~90% works again there.
+  - cart_optimizer/coupon_ledger.py: CouponLedger protocol + InMemoryCouponLedger
+    + JsonCouponLedger (persists to ~/.cart-optimizer/coupons.json). Stores
+    {restaurant_id: {code: {hits, misses, best_discount}}}. known() returns
+    proven codes best-first; codes that only ever miss are pruned after
+    PRUNE_AFTER_MISSES (3); a single hit keeps a code alive (expiry-tolerant).
+  - Verifier + run._verify_one: try branch-known codes FIRST, then suggested,
+    then generic candidates; record each outcome (discount>0 = hit, else miss)
+    back to the ledger. Over time each branch converges to its real coupon set,
+    so repeat orders rarely miss a coupon AND probe fewer dead codes.
+  - 13 new tests (ledger ranking/pruning/persistence/corrupt-file + verifier
+    records-and-tries-branch-first).
+
 ## Status: FULL STACK COMPLETE ✅ + LIVE-VALIDATED on 4 restaurants
 
 Engine + live verifier + end-to-end runner on branch `cart-optimizer-engine`.
