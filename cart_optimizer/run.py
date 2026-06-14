@@ -99,7 +99,9 @@ async def _verify_one(
         cartItems=cart_items,
     )
     raw = await get_raw()
-    bills.append(parse_cart_bill(raw))
+    base = parse_cart_bill(raw)
+    base_to_pay = base.to_pay
+    bills.append(base)
     suggested = _suggested_coupon(raw)
 
     # Order: branch-known (most likely valid) → suggested → generic candidates.
@@ -113,16 +115,61 @@ async def _verify_one(
         try:
             await client.call("apply_food_coupon", couponCode=code, addressId=address_id)
             bill = parse_cart_bill(await get_raw())
-            bills.append(bill)
+            # A coupon counts ONLY if it actually lowered the authoritative to_pay.
+            # Swiggy sometimes reports a discount in offers that isn't reflected in
+            # to_pay (min-order/suggestion) — we must not credit those.
+            really_worked = bill.to_pay < base_to_pay - 0.5
+            if really_worked:
+                bills.append(bill)
             if ledger is not None:
-                worked = bill.coupon_code == code and bill.coupon_discount > 0
-                ledger.record(restaurant_id, code, bill.coupon_discount if worked else 0)
+                ledger.record(restaurant_id, code,
+                              (base_to_pay - bill.to_pay) if really_worked else 0)
         except (SwiggyClientError, SwiggyAdapterError, Exception):
             if ledger is not None:
                 ledger.record(restaurant_id, code, 0)  # missed
 
     await client.call("flush_food_cart")
     return min(bills, key=lambda b: b.to_pay)
+
+
+# ── price discovery (real per-item prices) ────────────────────────────────────
+
+async def discover_prices(client, restaurant_id, restaurant_name, address_id,
+                          menu, budget, cap: int = 20) -> dict[str, int]:
+    """Build a cart of the top affordable items and read each one's REAL price
+    (final_price, which bakes in Swiggy's item-level discounts). Returns
+    {product_id: real_rupees}. One build+read; cart flushed after."""
+    from .adapters.swiggy import swiggy_id
+    items = [i for i in menu.orderable_items()
+             if min((v.cost for v in i.variants), default=0) <= budget]
+    items = sorted(items, key=lambda i: i.preference, reverse=True)[:cap]
+    if not items:
+        return {}
+    # One default line per item; Swiggy fills in each item's real final_price.
+    cart_items = [{"menu_item_id": swiggy_id(i.id), "quantity": 1} for i in items]
+    prices: dict[str, int] = {}
+    try:
+        await client.call("flush_food_cart")
+        await client.call("update_food_cart", restaurantId=restaurant_id,
+                          restaurantName=restaurant_name, addressId=address_id,
+                          cartItems=cart_items)
+        raw = await client.call("get_food_cart", addressId=address_id,
+                                restaurantName=restaurant_name)
+        await client.call("flush_food_cart")
+    except Exception:  # noqa: BLE001
+        return {}
+    data = raw.get("data") if isinstance(raw, dict) else None
+    for it in (data or {}).get("items", []):
+        mid = it.get("menu_item_id")
+        fp = it.get("final_price")
+        if fp is None:
+            fp = it.get("subtotal")
+        if mid is not None and fp is not None:
+            try:
+                prices[f"itm_{mid}"] = max(0, round(float(fp)))
+            except (TypeError, ValueError):
+                pass
+    return prices
 
 
 # ── display helpers ───────────────────────────────────────────────────────────

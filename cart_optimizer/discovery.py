@@ -39,7 +39,29 @@ __all__ = [
     "discover_best_cart",
     "propose_candidates",
     "scale_menu_costs",
+    "apply_real_prices",
 ]
+
+
+def apply_real_prices(menu: Menu, real: dict[str, int]) -> Menu:
+    """Replace each item's price with its REAL Swiggy-charged price.
+
+    ``real`` maps product_id (``itm_<id>``) → real rupee price read from a live
+    cart's per-item ``final_price`` (which bakes in Swiggy's item-level discounts).
+    Our menu carries pre-discount list prices, so the optimizer otherwise fills
+    the budget in an inflated price space and the real bill lands far under budget.
+    Items absent from ``real`` keep their list price. Multi-variant items are
+    scaled by the ratio so size up-charges stay proportional."""
+    def fix(i):
+        if i.id not in real:
+            return i
+        target = max(0, int(real[i.id]))
+        base = min((v.cost for v in i.variants), default=0) or 1
+        ratio = target / base
+        variants = tuple(dataclasses.replace(v, cost=max(0, round(v.cost * ratio)))
+                         for v in i.variants)
+        return dataclasses.replace(i, variants=variants)
+    return dataclasses.replace(menu, items=tuple(fix(i) for i in menu.items))
 
 
 def scale_menu_costs(menu: Menu, factor: float) -> Menu:

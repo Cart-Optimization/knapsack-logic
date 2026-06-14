@@ -29,11 +29,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from cart_optimizer.coupon_ledger import SqliteCouponLedger
-from cart_optimizer.models import PricingConfig, User
+from cart_optimizer.models import Cart, ItemLine, PricingConfig, User
 from cart_optimizer.adapters.swiggy import parse_menu
 from cart_optimizer.adapters.swiggy_session import DEFAULT_COUPON_CANDIDATES
-from cart_optimizer.discovery import VerifiedCart, propose_candidates, scale_menu_costs
-from cart_optimizer.run import _fetch_full_menu, _enrich_menu_detail, _verify_one
+from cart_optimizer.discovery import (
+    VerifiedCart, apply_real_prices, propose_candidates,
+)
+from cart_optimizer.run import (
+    _fetch_full_menu, _enrich_menu_detail, _verify_one, discover_prices,
+)
 from cart_optimizer.swiggy_client import SwiggyClient
 from . import oauth
 
@@ -235,13 +239,19 @@ async def optimize(request: Request):
         menu = await _get_menu_cached(client, rid, addr)
         if not rname:
             rname = menu.restaurant
+
+        # Calibrate to REAL prices: read each item's actual final_price from a probe
+        # cart (Swiggy item-level discounts make our list prices too high), so the
+        # optimizer fills the real budget instead of stopping early.
+        real = await discover_prices(client, rid, rname, addr, menu, budget)
+        if real:
+            menu = apply_real_prices(menu, real)
+
         candidates = propose_candidates(menu, User(), CONFIG, budget, max_candidates=4)
 
-        # Coupon strategy (minimal calls, only ones with a real chance):
-        #   • every cart always tries its auto-SUGGESTED coupon (Swiggy's own best
-        #     pick for that cart) + this branch's known-good codes from the ledger;
-        #   • a small curated discovery list runs ONLY on the first cart at a branch
-        #     we've never seen, to seed the shared ledger. After that: zero blind tries.
+        # Coupon strategy (minimal calls, only ones with a real chance): every cart
+        # tries its auto-SUGGESTED + this branch's known coupons; a small discovery
+        # list runs only on the first cart at a never-seen branch.
         learned = bool(ledger.known(rid))
         seen_keys: set = set()
 
@@ -264,18 +274,46 @@ async def optimize(request: Request):
 
         verified = await verify_candidates(candidates, allow_discovery=True)
 
-        # Budget calibration: Swiggy item-level discounts make our list prices
-        # over-state cost, so the cart can stop well under budget. Learn the real
-        # vs listed ratio from the best cart so far, rescale the menu, and
-        # re-optimize to fill the actual budget (one extra round).
+        # Greedy top-up: a coupon/fee gap can leave the cart under budget. Add the
+        # best affordable main and re-verify; keep it while it still fits and
+        # improves. Bounded so latency stays sane.
         if verified:
-            top = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
-            est = sum(l.cost for l in top.cart.lines) or 1
-            scale = top.bill.item_total / est
-            if top.bill.to_pay <= 0.85 * budget and scale < 0.92:
-                scaled = scale_menu_costs(menu, scale)
-                more = propose_candidates(scaled, User(), CONFIG, budget, max_candidates=4)
-                verified += await verify_candidates(more, allow_discovery=False)
+            best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
+            addable = sorted(
+                [i for i in menu.orderable_items()
+                 if min(v.cost for v in i.variants) <= budget],
+                key=lambda i: i.preference, reverse=True)
+            for _ in range(3):
+                headroom = budget - best.bill.to_pay
+                if headroom < 40:           # essentially full
+                    break
+                in_cart = {l.product_id for l in best.cart.lines}   # one line per product
+                added = False
+                for item in addable:
+                    if item.id in in_cart:
+                        continue
+                    line = ItemLine(item, min(item.variants, key=lambda v: v.cost))
+                    if line.cost > headroom * 1.4:   # too pricey to plausibly fit
+                        continue
+                    try:
+                        cart = Cart(best.cart.lines + (line,))
+                    except Exception:  # noqa: BLE001 — model rejects (dup product etc.)
+                        continue
+                    key = tuple(sorted((l.product_id, l.quantity) for l in cart.lines))
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    try:
+                        bill = await _verify_one(cart, client, rid, rname, addr, [], ledger=ledger)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if bill.to_pay <= budget and sum(l.preference for l in cart.lines) > best.preference:
+                        best = VerifiedCart(cart, bill)
+                        verified.append(best)
+                        added = True
+                        break
+                if not added:
+                    break
 
     if not verified:
         return JSONResponse({"found": False, "restaurant": rname,
