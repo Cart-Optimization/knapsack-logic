@@ -365,6 +365,31 @@ tools were ever called.
   - 13 new tests (ledger ranking/pruning/persistence/corrupt-file + verifier
     records-and-tries-branch-first).
 
+- [round 11 — shared DB + web app] GREEN: 454 passed.
+  - SqliteCouponLedger (coupon_ledger.py): same CouponLedger protocol, but SHARED
+    across all backend users — a coupon any user finds at a branch is instantly
+    tried first for everyone. UPSERT (hits/misses/best_discount) keyed by
+    (restaurant_id, code); thread-safe; all_branches() for an admin view.
+    9 new tests incl. cross-connection sharing + persistence + a parametrized
+    contract test that all three ledgers (memory/json/sqlite) behave identically.
+  - webapp/ FastAPI backend (full live Swiggy per visitor):
+    - oauth.py: web OAuth 2.1 + PKCE (start_login/exchange_code/refresh +
+      dynamic client registration). NOTE: token exchange NOT yet completed live
+      (needs a human Swiggy login) — built to published metadata, flagged.
+    - server.py: /login /callback /logout, /api/me /api/addresses
+      /api/restaurants /api/optimize /api/coupons/{rid}. Server-side sessions
+      (cookie holds opaque sid; tokens never reach the browser). /api/optimize
+      reuses run.py's _fetch_full_menu/_enrich_menu_detail/_verify_one with the
+      shared ledger. NEVER place_food_order; flushes after each probe.
+    - static/index.html: basic UI (login → address → restaurant search → budget
+      → best cart + authoritative bill + branch's shared coupons).
+  - Deploy: Dockerfile + render.yaml (free web service + 1GB disk for the shared
+    DB) + DEPLOY.md. Smoke-tested locally: /api/me, /api/coupons, / (HTML),
+    /login (307 → correct Swiggy authorize URL w/ PKCE+state), 401-gating all OK.
+    fastapi/uvicorn/itsdangerous added to requirements (work on Python 3.14).
+  - Cannot self-deploy (no hosting creds): user deploys via render.yaml; the only
+    unvalidated piece is the live OAuth login (needs their Swiggy credentials).
+
 ## Status: FULL STACK COMPLETE ✅ + LIVE-VALIDATED on 4 restaurants
 
 Engine + live verifier + end-to-end runner on branch `cart-optimizer-engine`.

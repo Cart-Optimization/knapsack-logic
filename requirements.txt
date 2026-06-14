@@ -2,3 +2,6 @@ pytest>=9.0
 pytest-randomly>=4.1
 mcp>=1.9
 httpx>=0.27
+fastapi>=0.115
+uvicorn[standard]>=0.30
+itsdangerous>=2.0

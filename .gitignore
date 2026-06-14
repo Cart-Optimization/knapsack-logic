@@ -7,3 +7,6 @@ __pycache__/
 *.egg-info/
 dist/
 .DS_Store
+data/
+*.db
+coupons.json

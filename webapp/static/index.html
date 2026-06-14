@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cart Optimizer — best-value Swiggy cart</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#262b36; --fg:#e8eaed; --mut:#9aa3b2;
+          --accent:#fc8019; --good:#2fbf71; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:var(--bg); color:var(--fg); }
+  .wrap { max-width:680px; margin:0 auto; padding:28px 18px 60px; }
+  h1 { font-size:24px; margin:0 0 2px; }
+  .sub { color:var(--mut); margin:0 0 22px; font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:18px; margin-bottom:16px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:0 0 6px; }
+  input, select { width:100%; padding:11px 12px; background:#0f1218; color:var(--fg);
+          border:1px solid var(--line); border-radius:10px; font-size:15px; }
+  button { background:var(--accent); color:#1a1206; border:0; border-radius:10px;
+           padding:12px 16px; font-size:15px; font-weight:600; cursor:pointer; width:100%; }
+  button.secondary { background:#222733; color:var(--fg); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; }
+  .row > * { flex:1; }
+  .hidden { display:none; }
+  .muted { color:var(--mut); font-size:13px; }
+  .rest { border:1px solid var(--line); border-radius:10px; padding:11px 12px; margin-top:8px;
+          cursor:pointer; display:flex; justify-content:space-between; align-items:center; }
+  .rest:hover { border-color:var(--accent); }
+  .rest small { color:var(--mut); display:block; }
+  .pill { background:#20262f; border:1px solid var(--line); border-radius:999px;
+          padding:3px 10px; font-size:12px; color:var(--mut); margin:2px 4px 2px 0; display:inline-block; }
+  .topay { font-size:30px; font-weight:700; }
+  .save { color:var(--good); font-weight:600; }
+  .lineitem { display:flex; justify-content:space-between; padding:7px 0; border-bottom:1px solid var(--line); }
+  .spin { color:var(--accent); }
+  a { color:var(--accent); }
+  .err { color:#ff6b6b; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛒 Cart Optimizer</h1>
+  <p class="sub">Log in with Swiggy, set a budget, get the best-value cart — coupons found automatically and shared across everyone.</p>
+
+  <!-- Logged out -->
+  <div id="login" class="card hidden">
+    <p>Connect your Swiggy account to begin.</p>
+    <button onclick="location.href='/login'">Login with Swiggy</button>
+    <p class="muted" style="margin-top:10px">Read-only browsing + cart building only. An order is <b>never</b> placed automatically.</p>
+  </div>
+
+  <!-- Logged in -->
+  <div id="app" class="hidden">
+    <div class="card">
+      <label>Deliver to</label>
+      <select id="address"></select>
+    </div>
+
+    <div class="card">
+      <label>Find a restaurant</label>
+      <div class="row">
+        <input id="q" placeholder="e.g. McDonald's, Burger King" />
+        <button class="secondary" style="flex:0 0 90px" onclick="search()">Search</button>
+      </div>
+      <div id="results"></div>
+    </div>
+
+    <div id="budgetCard" class="card hidden">
+      <label>Budget (₹) at <span id="chosenName"></span></label>
+      <div class="row">
+        <input id="budget" type="number" value="400" min="50" step="50" />
+        <button style="flex:0 0 140px" id="goBtn" onclick="optimize()">Find best cart</button>
+      </div>
+      <p id="status" class="muted" style="margin:10px 0 0"></p>
+    </div>
+
+    <div id="result" class="card hidden"></div>
+
+    <p class="muted"><a href="#" onclick="logout();return false">Log out</a></p>
+  </div>
+</div>
+
+<script>
+let chosen = null;       // {id, name}
+const $ = (id) => document.getElementById(id);
+
+async function boot() {
+  const me = await fetch('/api/me').then(r => r.json());
+  if (me.logged_in) { $('app').classList.remove('hidden'); loadAddresses(); }
+  else { $('login').classList.remove('hidden'); }
+}
+
+async function loadAddresses() {
+  const a = await fetch('/api/addresses').then(r => r.json());
+  $('address').innerHTML = a.map(x => `<option value="${x.id}">${x.label} — ${x.line}</option>`).join('');
+}
+
+async function search() {
+  const q = $('q').value.trim(); if (!q) return;
+  const addressId = $('address').value;
+  $('results').innerHTML = '<p class="muted spin">Searching…</p>';
+  const rs = await fetch(`/api/restaurants?q=${encodeURIComponent(q)}&addressId=${addressId}`)
+                    .then(r => r.json());
+  if (!rs.length) { $('results').innerHTML = '<p class="muted">No open restaurants found.</p>'; return; }
+  $('results').innerHTML = rs.map(r => `
+    <div class="rest" onclick='pick(${JSON.stringify(JSON.stringify({id:r.id,name:r.name}))})'>
+      <div><b>${r.name}</b><small>${r.area || ''} · ★${r.rating ?? '–'} · ${r.etaMins ?? '–'} min</small></div>
+      <div class="muted">${r.offer || ''} ›</div>
+    </div>`).join('');
+}
+
+function pick(s) {
+  chosen = JSON.parse(s);
+  $('chosenName').textContent = chosen.name;
+  $('budgetCard').classList.remove('hidden');
+  $('result').classList.add('hidden');
+  $('budgetCard').scrollIntoView({behavior:'smooth'});
+}
+
+async function optimize() {
+  if (!chosen) return;
+  $('goBtn').disabled = true;
+  $('status').innerHTML = '<span class="spin">Building & pricing carts live on Swiggy… (10–40s — trying coupons)</span>';
+  $('result').classList.add('hidden');
+  try {
+    const res = await fetch('/api/optimize', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ restaurantId: chosen.id, restaurantName: chosen.name,
+                             addressId: $('address').value, budget: Number($('budget').value) })
+    }).then(r => r.json());
+    render(res);
+  } catch (e) {
+    $('status').innerHTML = '<span class="err">Something went wrong: ' + e + '</span>';
+  } finally { $('goBtn').disabled = false; }
+}
+
+function render(res) {
+  $('status').textContent = '';
+  const el = $('result'); el.classList.remove('hidden');
+  if (!res.found) { el.innerHTML = `<p class="muted">${res.message}</p>`; return; }
+  const b = res.bill;
+  const items = res.items.map(i => `<div class="lineitem"><span>${i.qty}× ${i.name}</span><span>₹${i.cost}</span></div>`).join('');
+  const coupon = b.coupon ? `<span class="save">${b.coupon} −₹${Math.round(b.coupon_discount)}</span>` : '<span class="muted">no coupon helped</span>';
+  const known = (res.branch_known_coupons||[]).map(c => `<span class="pill">${c}</span>`).join('') || '<span class="muted">none yet</span>';
+  el.innerHTML = `
+    <div class="muted">Best value at ${res.restaurant}</div>
+    <div class="topay">₹${Math.round(b.to_pay)}</div>
+    <div style="margin:6px 0 14px">${coupon} · ${b.free_delivery ? 'free delivery' : 'delivery charged'} · ${b.cod ? 'COD ✓' : 'COD ✗'}</div>
+    ${items}
+    <div class="lineitem" style="border:0"><span class="muted">taxes & charges</span><span class="muted">₹${Math.round(b.taxes)}</span></div>
+    <p class="muted" style="margin-top:12px">Coupons known at this branch (shared by all users): ${known}</p>
+    <p class="muted">To order, open Swiggy and place it yourself — we never auto-order.</p>`;
+}
+
+async function logout() { await fetch('/logout', {method:'POST'}); location.reload(); }
+boot();
+</script>
+</body>
+</html>

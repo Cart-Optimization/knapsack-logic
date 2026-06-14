@@ -8,8 +8,10 @@ from cart_optimizer.adapters.swiggy_session import SwiggyOps, SwiggySessionVerif
 from cart_optimizer.coupon_ledger import (
     InMemoryCouponLedger,
     JsonCouponLedger,
+    SqliteCouponLedger,
     PRUNE_AFTER_MISSES,
 )
+import pytest
 from cart_optimizer.models import Cart, ItemLine, Item, Variant
 
 RID = "668678"
@@ -73,6 +75,49 @@ def test_json_ledger_survives_corrupt_file(tmp_path):
     assert led.known(RID) == []
     led.record(RID, "X", 10)
     assert led.known(RID) == ["X"]
+
+
+# ── shared SQLite ledger ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("make", [
+    lambda tmp: InMemoryCouponLedger(),
+    lambda tmp: JsonCouponLedger(tmp / "c.json"),
+    lambda tmp: SqliteCouponLedger(tmp / "c.db"),
+])
+def test_all_ledgers_share_the_same_contract(make, tmp_path):
+    """Every implementation must behave identically for the verifier."""
+    led = make(tmp_path)
+    assert led.known(RID) == []
+    led.record(RID, "BIG", 120)
+    led.record(RID, "SMALL", 30)
+    led.record(RID, "OTHER", 50)   # different... same branch
+    assert led.known(RID)[0] == "BIG"          # ranked by best discount
+    assert set(led.known(RID)) == {"BIG", "SMALL", "OTHER"}
+    for _ in range(PRUNE_AFTER_MISSES):
+        led.record(RID, "DEAD", 0)
+    assert "DEAD" not in led.known(RID)         # pruned
+
+
+def test_sqlite_is_shared_across_connections(tmp_path):
+    p = tmp_path / "shared.db"
+    user_a = SqliteCouponLedger(p)
+    user_b = SqliteCouponLedger(p)            # a different "user"/process
+    user_a.record(RID, "SWIGGYIT", 80)        # discovered by user A
+    assert user_b.known(RID) == ["SWIGGYIT"]  # immediately visible to user B
+
+
+def test_sqlite_persists_across_restart(tmp_path):
+    p = tmp_path / "persist.db"
+    SqliteCouponLedger(p).record(RID, "FLAT100", 99)
+    assert SqliteCouponLedger(p).known(RID) == ["FLAT100"]
+
+
+def test_sqlite_all_branches_view(tmp_path):
+    led = SqliteCouponLedger(tmp_path / "c.db")
+    led.record("111", "A", 10)
+    led.record("222", "B", 20)
+    branches = led.all_branches()
+    assert branches == {"111": ["A"], "222": ["B"]}
 
 
 # ── verifier integration ──────────────────────────────────────────────────────

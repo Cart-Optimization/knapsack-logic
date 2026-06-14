@@ -26,6 +26,8 @@ fake; ``JsonCouponLedger`` persists to disk for the real app.
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -33,6 +35,7 @@ __all__ = [
     "CouponLedger",
     "InMemoryCouponLedger",
     "JsonCouponLedger",
+    "SqliteCouponLedger",
     "PRUNE_AFTER_MISSES",
 ]
 
@@ -111,3 +114,75 @@ class JsonCouponLedger(InMemoryCouponLedger):
     def _flush(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+
+
+class SqliteCouponLedger:
+    """SQLite-backed ledger SHARED across every user of one backend.
+
+    This is the multi-user version: a coupon discovered by ANY user at a branch
+    immediately helps EVERY other user ordering from that same branch. Same
+    CouponLedger interface as the in-memory/JSON variants, so the verifier is
+    unchanged. Safe for concurrent web requests (one connection, a write lock,
+    and SQLite's own locking). Swap to Postgres later by reimplementing these two
+    methods against the same protocol.
+    """
+
+    def __init__(self, db_path: str | Path = ":memory:") -> None:
+        self._path = str(db_path)
+        if self._path != ":memory:":
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS coupons (
+                restaurant_id TEXT NOT NULL,
+                code          TEXT NOT NULL,
+                hits          INTEGER NOT NULL DEFAULT 0,
+                misses        INTEGER NOT NULL DEFAULT 0,
+                best_discount REAL    NOT NULL DEFAULT 0,
+                PRIMARY KEY (restaurant_id, code)
+            )
+            """
+        )
+        self._conn.commit()
+
+    def known(self, restaurant_id: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT code FROM coupons
+                WHERE restaurant_id = ?
+                  AND (hits > 0 OR misses < ?)
+                ORDER BY (hits > 0) DESC, best_discount DESC, hits DESC
+                """,
+                (str(restaurant_id), PRUNE_AFTER_MISSES),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def record(self, restaurant_id: str, code: str, discount: float) -> None:
+        if not code:
+            return
+        rid = str(restaurant_id)
+        hit = bool(discount and discount > 0)
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO coupons (restaurant_id, code, hits, misses, best_discount)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(restaurant_id, code) DO UPDATE SET
+                    hits          = hits   + ?,
+                    misses        = misses + ?,
+                    best_discount = MAX(best_discount, ?)
+                """,
+                (rid, code, 1 if hit else 0, 0 if hit else 1, float(discount) if hit else 0.0,
+                 1 if hit else 0, 0 if hit else 1, float(discount) if hit else 0.0),
+            )
+            self._conn.commit()
+
+    def all_branches(self) -> dict[str, list[str]]:
+        """Every branch → its known codes (for an admin/coupons view in the UI)."""
+        with self._lock:
+            rids = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT restaurant_id FROM coupons").fetchall()]
+        return {rid: self.known(rid) for rid in rids}

@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: cart-optimizer
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/me
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true            # Render generates a stable random secret
+      - key: BASE_URL
+        sync: false                    # set to your https URL after first deploy
+      - key: SWIGGY_CLIENT_ID
+        sync: false                    # optional: pre-registered OAuth client id
+      - key: COUPON_DB
+        value: /data/coupons.db
+    disk:
+      name: coupon-data                # persists the shared coupon ledger
+      mountPath: /data
+      sizeGB: 1
