@@ -316,7 +316,7 @@ function pick(s){
   $('chosenName').textContent = chosen.name;
   $('budgetPanel').classList.remove('hidden');
   $('result').innerHTML='';
-  $('budgetPanel').scrollIntoView({behavior:'smooth',block:'center'});
+  $('budgetPanel').scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
 /* budget controls */
@@ -342,7 +342,7 @@ async function optimize(){
   const paint=()=>{ const m=HUNT_MSGS[i%HUNT_MSGS.length];
     r.innerHTML=`<div class="panel hunt"><div class="radar"></div><div class="msg">${m[0]}</div><div class="sub">${m[1]}</div></div>`; i++; };
   paint(); huntTimer=setInterval(paint,2600);
-  r.scrollIntoView({behavior:'smooth',block:'center'});
+  r.scrollIntoView({behavior:'smooth',block:'start'});
   try{
     const res = await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({restaurantId:chosen.id,restaurantName:chosen.name,addressId:$('address').value,budget:+$('budget').value})}).then(r=>r.json());
