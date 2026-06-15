@@ -45,6 +45,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 COUPON_DB = os.getenv("COUPON_DB", "./data/coupons.db")
 SESSION_FILE = Path(os.getenv("SESSION_FILE", "./data/sessions.json"))
 CONFIG = PricingConfig(delivery_fee=30, platform_fee=5, gst_rate=0.05)
+BUDGET_BUFFER = 0.15   # option 2 may exceed budget by up to 15% if it's far better value
 
 # Chains we've validated end-to-end; "restaurants our service provides".
 SUPPORTED_BRANDS = ["McDonald's", "Burger King", "Starbucks", "Taco Bell", "KFC", "Domino's"]
@@ -247,7 +248,12 @@ async def optimize(request: Request):
         if real:
             menu = apply_real_prices(menu, real)
 
-        candidates = propose_candidates(menu, User(), CONFIG, budget, max_candidates=4)
+        # We show TWO carts: option 1 strictly within budget, option 2 a small
+        # "worth the stretch" buffer (up to +BUFFER) shown only when a notably
+        # higher-value cart just misses budget. So we verify up to the stretch
+        # ceiling and pick both from the same pool.
+        stretch = budget * (1 + BUDGET_BUFFER)
+        candidates = propose_candidates(menu, User(), CONFIG, stretch, max_candidates=5)
 
         # Coupon strategy (minimal calls, only ones with a real chance): every cart
         # tries its auto-SUGGESTED + this branch's known coupons; a small discovery
@@ -268,36 +274,36 @@ async def optimize(request: Request):
                     bill = await _verify_one(cart, client, rid, rname, addr, coupons, ledger=ledger)
                 except Exception:  # noqa: BLE001
                     continue
-                if bill.to_pay <= budget:
+                if bill.to_pay <= stretch:        # keep everything up to the stretch ceiling
                     out.append(VerifiedCart(cart, bill))
             return out
 
         verified = await verify_candidates(candidates, allow_discovery=True)
 
-        # Greedy top-up: a coupon/fee gap can leave the cart under budget. Add the
-        # best affordable main and re-verify; keep it while it still fits and
-        # improves. Bounded so latency stays sane.
+        # Greedy top-up toward the stretch ceiling: add the best affordable main and
+        # re-verify while it fits + improves. The pool keeps every intermediate cart,
+        # so we can still pick the best strictly-within-budget one afterward.
         if verified:
             best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
             addable = sorted(
                 [i for i in menu.orderable_items()
-                 if min(v.cost for v in i.variants) <= budget],
+                 if min(v.cost for v in i.variants) <= stretch],
                 key=lambda i: i.preference, reverse=True)
             for _ in range(3):
-                headroom = budget - best.bill.to_pay
-                if headroom < 40:           # essentially full
+                headroom = stretch - best.bill.to_pay
+                if headroom < 40:
                     break
-                in_cart = {l.product_id for l in best.cart.lines}   # one line per product
+                in_cart = {l.product_id for l in best.cart.lines}
                 added = False
                 for item in addable:
                     if item.id in in_cart:
                         continue
                     line = ItemLine(item, min(item.variants, key=lambda v: v.cost))
-                    if line.cost > headroom * 1.4:   # too pricey to plausibly fit
+                    if line.cost > headroom * 1.4:
                         continue
                     try:
                         cart = Cart(best.cart.lines + (line,))
-                    except Exception:  # noqa: BLE001 — model rejects (dup product etc.)
+                    except Exception:  # noqa: BLE001
                         continue
                     key = tuple(sorted((l.product_id, l.quantity) for l in cart.lines))
                     if key in seen_keys:
@@ -307,7 +313,7 @@ async def optimize(request: Request):
                         bill = await _verify_one(cart, client, rid, rname, addr, [], ledger=ledger)
                     except Exception:  # noqa: BLE001
                         continue
-                    if bill.to_pay <= budget and sum(l.preference for l in cart.lines) > best.preference:
+                    if bill.to_pay <= stretch and sum(l.preference for l in cart.lines) > best.preference:
                         best = VerifiedCart(cart, bill)
                         verified.append(best)
                         added = True
@@ -315,27 +321,41 @@ async def optimize(request: Request):
                 if not added:
                     break
 
-    if not verified:
+    within = [v for v in verified if v.bill.to_pay <= budget + 0.5]
+    if not within:
         return JSONResponse({"found": False, "restaurant": rname,
                              "message": f"No cart fits ₹{budget:.0f}."})
 
-    best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
+    option1 = max(within, key=lambda v: (v.preference, -v.bill.to_pay))
+    options = [_option(option1, budget, "within")]
+
+    # Option 2: the best cart in the buffer zone, but only if it clearly beats
+    # option 1's value for that small overage (else two near-identical carts).
+    stretch_best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
+    if (stretch_best.bill.to_pay > budget + 0.5
+            and stretch_best.preference > option1.preference + 1e-6):
+        options.append(_option(stretch_best, budget, "stretch"))
+
+    return {"found": True, "restaurant": rname,
+            "budget": budget, "options": options,
+            "branch_known_coupons": ledger.known(rid)}
+
+
+def _option(v: VerifiedCart, budget: float, kind: str) -> dict:
     return {
-        "found": True,
-        "restaurant": rname,
-        "preference": round(best.preference, 2),
-        "items": [{"name": _line_name(l), "qty": l.quantity, "cost": l.cost}
-                  for l in best.cart.lines],
+        "kind": kind,
+        "over": max(0, round(v.bill.to_pay - budget)),
+        "preference": round(v.preference, 2),
+        "items": [{"name": _line_name(l), "qty": l.quantity} for l in v.cart.lines],
         "bill": {
-            "to_pay": best.bill.to_pay,
-            "item_total": best.bill.item_total,
-            "coupon": best.bill.coupon_code,
-            "coupon_discount": best.bill.coupon_discount,
-            "free_delivery": best.bill.free_delivery,
-            "taxes": best.bill.taxes_and_charges,
-            "cod": best.bill.cod_available,
+            "to_pay": v.bill.to_pay,
+            "item_total": v.bill.item_total,
+            "coupon": v.bill.coupon_code,
+            "coupon_discount": v.bill.coupon_discount,
+            "free_delivery": v.bill.free_delivery,
+            "taxes": v.bill.taxes_and_charges,
+            "cod": v.bill.cod_available,
         },
-        "branch_known_coupons": ledger.known(rid),
     }
 
 

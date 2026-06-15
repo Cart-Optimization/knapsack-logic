@@ -158,6 +158,12 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 .tag.good{color:var(--leaf);border-color:rgba(36,122,74,.3)}
 .rc-foot{font-family:"Hanken Grotesk";font-size:12px;color:var(--ink-2);margin-top:16px;text-align:center;line-height:1.6}
 .barcode{height:34px;margin:16px 0 4px;background:repeating-linear-gradient(90deg,var(--ink) 0 2px,transparent 2px 4px,var(--ink) 4px 5px,transparent 5px 9px);opacity:.85}
+.receipt{margin-bottom:16px}
+.receipt.stretch{background:var(--paper);border-color:var(--leaf)}
+.receipt.stretch .rc-kicker{color:var(--leaf)}
+.ribbon{position:absolute;top:14px;right:-1px;background:var(--leaf);color:#fff;font-family:"Hanken Grotesk";
+  font-weight:700;font-size:12px;padding:4px 12px;border-radius:8px 0 0 8px;letter-spacing:.02em}
+.rc-disclaimer{font-size:12px;color:var(--ink-2);text-align:center;margin:4px 4px 0;line-height:1.6}
 
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 @keyframes print{from{opacity:0;transform:translateY(-10px) scaleY(.96);transform-origin:top}to{opacity:1;transform:none}}
@@ -348,30 +354,38 @@ async function optimize(){
 function render(res){
   const r=$('result');
   if(!res.found){ r.innerHTML=`<div class="panel"><p class="muted">${esc(res.message||'No cart fits that budget.')}</p></div>`; return; }
-  const b=res.bill;
-  const lines=res.items.map(it=>`<div class="rc-line"><span><span class="q">${it.qty}×</span> ${esc(it.name)}</span></div>`).join('');
-  const saved=Math.round(b.coupon_discount||0);
+  const opts = res.options || [];
+  const known=(res.branch_known_coupons||[]);
+  r.innerHTML = opts.map((o,idx)=>receiptHTML(res.restaurant, o, idx, known, res.budget)).join('')
+    + `<p class="rc-disclaimer">Open Swiggy to place it yourself — we never auto-order.${
+        known.length?` · Coupons known at this branch: <b>${known.map(esc).join(', ')}</b>`:''}</p>`;
+  // count up each total
+  opts.forEach((o,idx)=>{ const el=document.getElementById('cup'+idx); if(el) countUp(el, Math.round(o.bill.to_pay), 850); });
+}
+
+function receiptHTML(restaurant, o, idx, known, budget){
+  const b=o.bill, saved=Math.round(b.coupon_discount||0);
+  const stretch = o.kind==='stretch';
+  const lines=o.items.map(it=>`<div class="rc-line"><span><span class="q">${it.qty}×</span> ${esc(it.name)}</span></div>`).join('');
   const tags=[ b.free_delivery?`<span class="tag good">free delivery</span>`:'',
     b.cod?`<span class="tag good">COD ✓</span>`:`<span class="tag">card only</span>`,
     b.coupon?`<span class="tag good">${esc(b.coupon)}</span>`:`<span class="tag">no coupon needed</span>` ].filter(Boolean).join('');
-  const known=(res.branch_known_coupons||[]);
-  r.innerHTML=`<div class="receipt">
-    <div class="rc-top"><div class="rc-kicker">Best value found</div><div class="rc-rest">${esc(res.restaurant)}</div></div>
+  const kicker = stretch
+    ? `Worth the stretch · ₹${o.over} over`
+    : `Option 1 · within ₹${Math.round(budget)}`;
+  return `<div class="receipt ${stretch?'stretch':''}">
+    ${stretch?`<div class="ribbon">+ ₹${o.over}</div>`:''}
+    <div class="rc-top"><div class="rc-kicker">${esc(kicker)}</div><div class="rc-rest">${esc(restaurant)}</div></div>
     ${lines}
     <div class="rc-sep"></div>
     <div class="rc-line rc-fin"><span>Item total</span><span class="v">₹${Math.round(b.item_total)}</span></div>
     ${saved>0?`<div class="rc-line rc-fin"><span>Coupon ${esc(b.coupon||'')}</span><span class="save">−₹${saved}</span></div>`:''}
     <div class="rc-line rc-fin"><span>Taxes & charges</span><span class="v">₹${Math.round(b.taxes)}</span></div>
     <div class="rc-line rc-fin"><span>Delivery</span><span class="${b.free_delivery?'save':'v'}">${b.free_delivery?'FREE':'charged'}</span></div>
-    <div class="rc-total"><span class="k">TO PAY</span><span class="amt">₹<span id="cup">0</span></span></div>
+    <div class="rc-total"><span class="k">TO PAY</span><span class="amt">₹<span id="cup${idx}">0</span></span></div>
     <div class="rc-tags">${tags}</div>
     <div class="barcode"></div>
-    <div class="rc-foot">
-      ${known.length?`Coupons this branch is known to give: <b>${known.map(esc).join(', ')}</b> — shared by everyone.<br>`:''}
-      Open Swiggy to place it yourself. We never auto-order.
-    </div>
   </div>`;
-  countUp($('cup'), Math.round(b.to_pay), 850);
 }
 
 function countUp(el,to,ms){ const t0=performance.now();
