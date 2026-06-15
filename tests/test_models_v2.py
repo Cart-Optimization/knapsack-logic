@@ -184,7 +184,7 @@ def test_combo_unavailable():
     [
         dict(id="itm_x", cost=100, preference=0.5),                      # prefix
         dict(id="cmb_x", cost=-5, preference=0.5),                       # cost
-        dict(id="cmb_x", cost=100, preference=2.0),                      # pref
+        dict(id="cmb_x", cost=100, preference=6.0),                      # pref > MAX
         dict(id="cmb_x", cost=100, preference=0.5, max_quantity=0),      # qty
         dict(id="cmb_x", cost=100, preference=0.5,
              composition={"var_x": 1}),                                  # bad ref prefix

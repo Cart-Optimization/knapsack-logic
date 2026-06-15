@@ -117,6 +117,9 @@ input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:99
   background:linear-gradient(90deg,var(--flame) var(--pct,40%),var(--line-2) var(--pct,40%));outline:none;margin:6px 0 16px}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;
   background:var(--flame);border:3px solid var(--paper-2);box-shadow:var(--shadow);cursor:grab}
+.drinkrow{display:flex;align-items:center;gap:10px;margin:2px 0 14px;font-size:14px;font-weight:600;cursor:pointer}
+.drinkrow input{width:18px;height:18px;accent-color:var(--flame);cursor:pointer}
+.drinkrow em{font-style:normal;color:var(--ink-2);font-weight:400}
 .find{width:100%;background:var(--flame);color:#fff;font-weight:700;font-size:16px;padding:16px;
   border-radius:14px;box-shadow:var(--shadow);transition:transform .12s ease,filter .2s}
 .find:hover{filter:brightness(1.05);transform:translateY(-1px)}
@@ -235,6 +238,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
         <button class="preset" data-v="800">₹800</button>
       </div>
       <input id="budget" type="range" min="100" max="1000" step="20" value="400" oninput="onBudgetSlide()"/>
+      <label class="drinkrow"><input id="drinkToggle" type="checkbox"/>
+        <span>Include a drink <em>— we'll get it the cheapest way, usually as a meal</em></span></label>
       <button id="goBtn" class="find" onclick="optimize()">Find my best cart →</button>
     </div>
 
@@ -345,7 +350,7 @@ async function optimize(){
   r.scrollIntoView({behavior:'smooth',block:'start'});
   try{
     const res = await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({restaurantId:chosen.id,restaurantName:chosen.name,addressId:$('address').value,budget:+$('budget').value})}).then(r=>r.json());
+      body:JSON.stringify({restaurantId:chosen.id,restaurantName:chosen.name,addressId:$('address').value,budget:+$('budget').value,drinks:$('drinkToggle').checked})}).then(r=>r.json());
     clearInterval(huntTimer); render(res);
   }catch(e){ clearInterval(huntTimer); r.innerHTML=`<div class="panel"><p class="err">Something went wrong: ${esc(String(e))}</p></div>`; }
   finally{ $('goBtn').disabled=false; }

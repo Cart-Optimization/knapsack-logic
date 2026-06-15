@@ -53,7 +53,7 @@ def test_item_ok():
     assert item.available and item.variants[0].cost == 199
 
 
-@pytest.mark.parametrize("bad_pref", [-0.1, 1.1, "high", None])
+@pytest.mark.parametrize("bad_pref", [-0.1, 5.1, "high", None])  # >5 (MAX_PREFERENCE) invalid
 def test_item_bad_preference(bad_pref):
     with pytest.raises(MenuError):
         mk_item("pizza", 199, bad_pref)

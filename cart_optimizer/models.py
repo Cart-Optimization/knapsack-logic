@@ -29,6 +29,11 @@ OPTION_PREFIX = "opt_"
 
 COUPON_KINDS = ("flat", "percent", "free_delivery")
 
+# A single item's taste score is in [0, 1]. Bundles (meals/combos) may exceed 1
+# because they're worth the SUM of their parts (main + side + drink); the cap is
+# raised for Item/Combo so a meal can out-value an equivalent à-la-carte set.
+MAX_PREFERENCE = 5.0
+
 ALLOWED_QUERY_NAMES = frozenset({"subtotal", "select_subtotal", "user"})
 ALLOWED_USER_FIELDS = frozenset({"member", "first_order"})
 
@@ -151,8 +156,8 @@ class Item:
     def __post_init__(self) -> None:
         _require_id(self.id, ITEM_PREFIX)
         pref = _require_number(self.preference, f"item {self.id}: preference")
-        if not 0.0 <= pref <= 1.0:
-            raise MenuError(f"item {self.id}: preference must be in [0, 1], got {pref}")
+        if not 0.0 <= pref <= MAX_PREFERENCE:
+            raise MenuError(f"item {self.id}: preference must be in [0, {MAX_PREFERENCE}], got {pref}")
         object.__setattr__(self, "variants", tuple(self.variants))
         if not self.variants:
             raise MenuError(f"item {self.id}: needs at least one variant")
@@ -307,8 +312,8 @@ class Combo:
                 f"combo {self.id}: cost must be a non-negative int, got {self.cost!r}"
             )
         pref = _require_number(self.preference, f"combo {self.id}: preference")
-        if not 0.0 <= pref <= 1.0:
-            raise MenuError(f"combo {self.id}: preference must be in [0, 1]")
+        if not 0.0 <= pref <= MAX_PREFERENCE:
+            raise MenuError(f"combo {self.id}: preference must be in [0, {MAX_PREFERENCE}]")
         pairs = (
             self.composition.items()
             if isinstance(self.composition, Mapping)

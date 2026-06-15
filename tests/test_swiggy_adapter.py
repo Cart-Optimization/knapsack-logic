@@ -104,6 +104,36 @@ def test_sides_and_desserts_are_downweighted_vs_mains():
     assert pref["Crunchy Taco"] > pref["Choco Sundae"]
 
 
+def test_meals_are_valued_as_bundles_above_one():
+    # A combo/meal bundles main+side+drink, so it must out-value a single item.
+    menu = parse_menu({"restaurant": {"name": "McD", "cuisines": ["Burgers"]},
+        "categories": [{"title": "Menu", "items": [
+            {"id": "1", "name": "McChicken Burger", "price": 159, "inStock": 1, "rating": "4.6"},
+            {"id": "2", "name": "McChicken Burger Combo", "price": 325, "inStock": 1, "rating": "4.5"}]}]})
+    pref = {i.name: i.preference for i in menu.items}
+    assert pref["McChicken Burger"] <= 1.0
+    assert pref["McChicken Burger Combo"] > 1.5      # bundle worth ~main+side+drink
+
+
+def test_contains_drink_classification():
+    from cart_optimizer.adapters.swiggy import contains_drink
+    assert contains_drink("McChicken Burger Combo")          # combo bundles a drink
+    assert contains_drink("Coke")                            # standalone drink
+    assert contains_drink("Reg Meal- Fries(R)+Coke")         # named drink
+    assert not contains_drink("McAloo Tikki Burger")         # plain main
+    assert not contains_drink("Fries (M)")                   # plain side
+    assert not contains_drink("Veg Burger + Fries (M)")      # fries combo, no drink
+
+
+def test_meal_named_with_fries_not_downweighted_as_side():
+    # "Reg Meal- Fries+Coke" must be valued as a bundle, not a side despite 'fries'.
+    menu = parse_menu({"restaurant": {"name": "BK", "cuisines": ["Burgers"]},
+        "categories": [{"title": "Menu", "items": [
+            {"id": "9", "name": "Crispy Veg Reg Meal- Fries(R)+Coke", "price": 189,
+             "inStock": 1, "rating": "4.4"}]}]})
+    assert menu.items[0].preference > 1.5
+
+
 def test_drinks_are_sides_at_a_food_place():
     menu = parse_menu({"restaurant": {"name": "McD", "cuisines": ["Burgers", "Beverages"]},
         "categories": [{"title": "Menu", "items": [

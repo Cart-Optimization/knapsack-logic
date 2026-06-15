@@ -45,6 +45,10 @@ __all__ = [
     "parse_coupons",
     "parse_cart_bill",
     "swiggy_id",
+    "is_meal",
+    "is_drink_item",
+    "contains_drink",
+    "is_beverage_led",
 ]
 
 DEFAULT_PREFERENCE = 0.6
@@ -102,11 +106,51 @@ BEVERAGE_LED_CUISINES = {"beverages", "cafe", "coffee", "juices", "tea",
 SIDE_WEIGHT = 0.45      # how much a side counts vs a main of the same rating
 DESSERT_WEIGHT = 0.40
 
+# A meal/combo bundles a main with a side and/or drink at a bundle discount, so
+# it's worth MORE than one item — we add a bonus so the optimizer prefers a meal
+# over the equivalent à-la-carte set when it's cheaper. Detected by name.
+# Names that indicate a BUNDLE (main + side and/or drink), for the value bonus.
+# Kept strict so a plain "Fries (M)" side is NOT mistaken for a meal.
+MEAL_KEYWORDS = ("meal", "combo", "+ fries", "+fries", "fries +", "+ coke",
+                 "+coke", "+ drink", "+ beverage", "+ pepsi", "+ thums",
+                 "+ shake", "with fries", "with a drink")
+# Tokens that mean an actual DRINK is in the item (for the drinks-off filter).
+DRINK_IN_NAME = ("coke", "pepsi", "thums", "sprite", "fanta", "cola",
+                 "drink", "beverage", "shake")
+MEAL_BONUS = 0.85       # extra value for the bundled side+drink a meal carries
+
 
 def is_beverage_led(cuisines: Iterable[str]) -> bool:
     """True if this restaurant's main offering is drinks (so don't down-weight them)."""
     cuisines = [str(c).lower() for c in (cuisines or [])]
     return bool(cuisines) and cuisines[0] in BEVERAGE_LED_CUISINES
+
+
+def is_meal(name: str) -> bool:
+    """True if the item name looks like a bundled meal/combo (carries a drink/side)."""
+    return any(k in name.lower() for k in MEAL_KEYWORDS)
+
+
+def is_drink_item(name: str, category: str = "") -> bool:
+    """True if the item itself is a (soft) drink — for the drinks toggle filter."""
+    text = f"{name} {category}".lower()
+    return (any(k in text for k in DRINK_KEYWORDS)
+            or any(h in category.lower() for h in BEVERAGE_CATEGORY_HINTS))
+
+
+def contains_drink(name: str, category: str = "", beverage_led: bool = False) -> bool:
+    """Would this item put a drink in the cart? A standalone soft drink, a combo/
+    meal (which bundles a drink), or a bundle whose name names a drink. A pure
+    burger+fries combo (no drink in the name) is NOT treated as a drink. Used to
+    strip drink-bearing items when the user hasn't opted in."""
+    n = name.lower()
+    if any(t in n for t in DRINK_IN_NAME):
+        return True
+    if "combo" in n or "meal" in n:   # combos/meals at food places bundle a drink
+        return True
+    if beverage_led:
+        return False   # at a cafe, coffee/shakes ARE the food, not an add-on drink
+    return is_drink_item(name, category)
 
 
 def _relevance_weight(name: str, category: str = "", beverage_is_main: bool = False) -> float:
@@ -118,6 +162,8 @@ def _relevance_weight(name: str, category: str = "", beverage_is_main: bool = Fa
     restaurant's cuisine (drinks are mains at a cafe, sides at a food place)."""
     cat = category.lower()
     text = f"{name} {cat}".lower()
+    if is_meal(name):
+        return 1.0          # a bundle is a main-class pick; bundle bonus added on top
     if any(k in text for k in DESSERT_KEYWORDS):
         return DESSERT_WEIGHT
     if any(k in text for k in SIDE_KEYWORDS) or any(h in cat for h in SIDE_CATEGORY_HINTS):
@@ -140,8 +186,14 @@ def _preference(item: Mapping[str, Any], category: str = "",
             score = DEFAULT_PREFERENCE
     if item.get("isBestseller"):
         score += BESTSELLER_BONUS
-    score *= _relevance_weight(str(item.get("name", "")), category, beverage_is_main)
-    return round(max(0.0, min(1.0, score)), 2)
+    name = str(item.get("name", ""))
+    score *= _relevance_weight(name, category, beverage_is_main)
+    score = max(0.0, min(1.0, score))
+    # A meal/combo is worth more than one item (it bundles a side+drink): add the
+    # bonus on TOP of the [0,1] item score so the optimizer can prefer it.
+    if is_meal(name):
+        score += MEAL_BONUS
+    return round(score, 2)
 
 
 def parse_addon_groups(addons: Iterable[Mapping[str, Any]]) -> tuple[AddonGroup, ...]:

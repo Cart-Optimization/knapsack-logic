@@ -235,11 +235,19 @@ async def optimize(request: Request):
     addr = str(body["addressId"])
     budget = float(body["budget"])
     rname = str(body.get("restaurantName", ""))
+    want_drinks = bool(body.get("drinks", False))
 
     async with SwiggyClient(token) as client:
         menu = await _get_menu_cached(client, rid, addr)
         if not rname:
             rname = menu.restaurant
+
+        # Drinks toggle (default OFF): if the user doesn't want a drink, strip
+        # standalone drinks AND meals/combos (which bundle a drink) so the cart is
+        # pure food and nothing auto-adds a drink. ON: keep them — a meal is valued
+        # as a bundle (worth its parts) so the optimizer prefers it over à-la-carte.
+        if not want_drinks:
+            menu = _food_only(menu)
 
         # Calibrate to REAL prices: read each item's actual final_price from a probe
         # cart (Swiggy item-level discounts make our list prices too high), so the
@@ -378,6 +386,19 @@ def _line_name(line) -> str:
 # pagination + enrichment calls on repeat budgets/visits — a big latency cut.
 _MENU_CACHE: dict[tuple[str, str], tuple[float, object]] = {}
 _MENU_TTL = 600  # seconds
+
+
+def _food_only(menu):
+    """Drop drink items and meal/combo bundles (they carry a drink) — used when the
+    user hasn't opted into drinks. Reuses the adapter's name-based classification."""
+    import dataclasses
+    from cart_optimizer.adapters.swiggy import contains_drink, is_beverage_led
+    bev = is_beverage_led(getattr(menu, "cuisines", []) or [])
+    kept = tuple(i for i in menu.items if not contains_drink(i.name, "", bev))
+    combos = tuple(c for c in menu.combos if not contains_drink(c.name, "", bev))
+    if not kept:
+        return menu   # never strip everything (e.g. a cafe) — fall back to full menu
+    return dataclasses.replace(menu, items=kept, combos=combos)
 
 
 async def _get_menu_cached(client, rid: str, addr: str):
