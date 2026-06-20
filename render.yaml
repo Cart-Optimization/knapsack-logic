@@ -8,14 +8,15 @@ services:
       - key: SESSION_SECRET
         generateValue: true            # Render generates a stable random secret
       - key: BASE_URL
-        sync: false                    # set to your https URL after first deploy
+        sync: false                    # set to your https URL after first deploy (for OAuth)
       - key: SWIGGY_CLIENT_ID
         sync: false                    # optional: pre-registered OAuth client id
-      - key: COUPON_DB
-        value: /data/coupons.db        # shared coupon ledger on the persistent disk
-      - key: SESSION_FILE
-        value: /data/sessions.json     # logins survive restarts (also on the disk)
-    disk:
-      name: flavourscout-data            # persists the coupon ledger + sessions
-      mountPath: /data
-      sizeGB: 1
+
+# NOTE: Render's free tier has an ephemeral filesystem and no persistent disks,
+# so the coupon ledger + sessions reset on restart/redeploy (fine for the demo —
+# it needs no persistence). COUPON_DB / SESSION_FILE default to /data via the
+# Dockerfile. For durability, move to a paid plan and add:
+#   disk:
+#     name: flavourscout-data
+#     mountPath: /data
+#     sizeGB: 1
