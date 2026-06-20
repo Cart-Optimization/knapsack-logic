@@ -1,4 +1,4 @@
-# Deploying BudgetBite
+# Deploying FlavourScout
 
 A FastAPI backend + static UI. Each visitor logs into their own Swiggy account
 (OAuth 2.1 + PKCE); the backend runs the optimize → live-verify pipeline,
@@ -26,8 +26,8 @@ the request automatically).
 The repo is on GitHub (`Cart-Optimization/knapsack-logic`, default branch `main`).
 
 1. **Render → New → Blueprint**, point it at the repo. It reads `render.yaml` and
-   creates the Docker web service **budgetbite** + a 1 GB disk at `/data`.
-2. First deploy gives a URL like `https://budgetbite-xxxx.onrender.com`.
+   creates the Docker web service **flavourscout** + a 1 GB disk at `/data`.
+2. First deploy gives a URL like `https://flavourscout-xxxx.onrender.com`.
 3. Set the **`BASE_URL`** env var to that exact https URL and redeploy (so the
    OAuth `redirect_uri` matches). This is the **only** var you must set by hand.
 4. Open the URL → **Login with Swiggy**.

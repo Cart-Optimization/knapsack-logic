@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: budgetbite
+    name: flavourscout
     runtime: docker
     plan: free
     healthCheckPath: /api/me
@@ -16,6 +16,6 @@ services:
       - key: SESSION_FILE
         value: /data/sessions.json     # logins survive restarts (also on the disk)
     disk:
-      name: budgetbite-data            # persists the coupon ledger + sessions
+      name: flavourscout-data            # persists the coupon ledger + sessions
       mountPath: /data
       sizeGB: 1

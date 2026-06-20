@@ -1,7 +1,7 @@
 """Bundled sample menu for the no-login public demo.
 
 The demo runs the REAL optimizer + profiling + coupon-aware logic on fixed data,
-so anyone can try BudgetBite without a Swiggy login. Totals are *estimated* from
+so anyone can try FlavourScout without a Swiggy login. Totals are *estimated* from
 the internal fee model — the live app reads the platform's authoritative bill
 instead. Kept separate from cart_optimizer.mock_data (which tests pin)."""
 
