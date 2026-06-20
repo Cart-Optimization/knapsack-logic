@@ -9,10 +9,12 @@ You pick a restaurant and a number (say ₹400). FlavourScout figures out the
 best working coupon, delivery, and taxes. No more juggling items in your head or
 hunting for codes that turn out to be expired.
 
-> 🧪 **No sign-in needed:** open the live link (or run it locally) and click
-> **Connect Swiggy** — while real Swiggy login is being set up, it opens a live
-> demo that runs the real engine on a sample menu.
-> *(First load can take ~30s — the free host wakes from sleep.)*
+> 🧪 **Two ways to use it.** The **demo** needs no sign-in — it runs the real
+> engine on a sample menu, and it's what the live link and the **Connect Swiggy**
+> button open by default. Running it **locally**, you can sign in with your *own*
+> Swiggy account and it builds real carts on it, priced by the platform's
+> authoritative bill.
+> *(First load on the live link can take ~30s — the free host wakes from sleep.)*
 
 ---
 
@@ -42,11 +44,13 @@ venv/bin/pip install -r requirements.txt
 venv/bin/uvicorn webapp.server:app --port 8000
 ```
 
-Open **http://localhost:8000** → click **"Try the demo — no login"**, set a budget,
-and watch it build the cart. ✨
+Open **http://localhost:8000** → **Connect Swiggy** opens the no-login demo (real
+engine, sample menu); set a budget and watch it build the cart. ✨
 
-*(To use it on your own Swiggy account you need Swiggy's MCP/builder access — the
-demo needs none.)*
+*(To order on your **own** Swiggy account, sign in with it when running locally —
+no special access required. Swiggy's builder program, which we're working toward,
+isn't needed for this — it would let the app run hosted instead of locally and
+raise the rate limits.)*
 
 ### 🐳 Or with Docker
 
