@@ -32,8 +32,8 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from cart_optimizer.coupon_ledger import SqliteCouponLedger
 from cart_optimizer.models import Cart, ItemLine, PricingConfig, User
-from cart_optimizer.adapters.swiggy import parse_menu
-from cart_optimizer.adapters.swiggy_session import DEFAULT_COUPON_CANDIDATES
+from cart_optimizer.adapters.swiggy import parse_menu, parse_cart_bill
+from cart_optimizer.adapters.swiggy_session import DEFAULT_COUPON_CANDIDATES, cart_to_swiggy_items
 from cart_optimizer.discovery import (
     VerifiedCart, apply_real_prices, propose_candidates,
 )
@@ -437,6 +437,7 @@ async def optimize(request: Request, body: OptimizeRequest):
         return (_main_count(v.cart) >= group_size, v.preference, -v.bill.to_pay)
 
     option1 = max(within, key=_rank)
+    chosen = [option1]
     options = [_option(option1, budget, "within")]
 
     # Option 2: the best cart in the buffer zone, but only if it clearly beats
@@ -445,6 +446,17 @@ async def optimize(request: Request, body: OptimizeRequest):
     if (stretch_best.bill.to_pay > budget + 0.5
             and stretch_best.preference > option1.preference + 1e-6):
         options.append(_option(stretch_best, budget, "stretch"))
+        chosen.append(stretch_best)
+
+    # Stash the exact carts behind these options so Place Order can rebuild them.
+    sid = request.session.get("sid")
+    if sid:
+        _PENDING[sid] = {
+            "rid": rid, "rname": rname, "addr": addr,
+            "options": [{"items": cart_to_swiggy_items(v.cart),
+                         "coupon": v.bill.coupon_code,
+                         "to_pay": v.bill.to_pay} for v in chosen],
+        }
 
     return {"found": True, "restaurant": rname,
             "budget": budget, "group_size": group_size,
@@ -498,6 +510,91 @@ def branch_coupons(restaurant_id: str):
     return {"restaurant_id": restaurant_id, "coupons": ledger.known(restaurant_id)}
 
 
+# ── order placement (user-initiated, COD-aware) ────────────────────────────────
+
+class PlaceOrderRequest(BaseModel):
+    optionIndex: int = Field(default=0, ge=0)
+    confirmed: bool = False                 # set only by the confirmation modal
+    expectedTotal: float | None = None      # the total the user saw, for the drift guard
+
+
+def _order_info(result) -> dict:
+    """Defensively pull an order id + status from place_food_order's response
+    (its exact shape isn't verified here — placement is the user's to test)."""
+    data = result if isinstance(result, dict) else {}
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    return {
+        "order_id": inner.get("order_id") or inner.get("orderId") or data.get("order_id"),
+        "status": str(inner.get("status") or data.get("status") or "PLACED"),
+    }
+
+
+@app.post("/api/place-order")
+async def place_order(request: Request, body: PlaceOrderRequest):
+    """Place the real order for a previously-shown option. SAFETY: only ever runs
+    on an explicit, confirmed user action; rebuilds + re-verifies the bill (drift
+    guard) before calling place_food_order; honours Swiggy's <₹1000 beta cap."""
+    token = _token(request)
+    if not body.confirmed:
+        raise HTTPException(status_code=400, detail="order not confirmed")
+    sid = request.session.get("sid")
+    pending = _PENDING.get(sid) if sid else None
+    if not pending or body.optionIndex >= len(pending["options"]):
+        raise HTTPException(status_code=409, detail="no cart ready — run a search first")
+
+    opt = pending["options"][body.optionIndex]
+    rid, rname, addr = pending["rid"], pending["rname"], pending["addr"]
+    log.info("place-order start rid=%s option=%d", rid, body.optionIndex)
+
+    try:
+        async with SwiggyClient(token) as client:
+            # Rebuild the exact cart (fresh slate first), re-apply its winning coupon.
+            await client.call("flush_food_cart")
+            await client.call("update_food_cart", restaurantId=rid, restaurantName=rname,
+                              addressId=addr, cartItems=opt["items"])
+            if opt.get("coupon"):
+                try:
+                    await client.call("apply_food_coupon", couponCode=opt["coupon"], addressId=addr)
+                except Exception as e:  # noqa: BLE001 — coupon may no longer apply; place anyway
+                    log.warning("place-order coupon %s failed: %s", opt["coupon"], e)
+            bill = parse_cart_bill(await client.call("get_food_cart", addressId=addr,
+                                                     restaurantName=rname))
+
+            # Swiggy MCP beta hard-caps placement under ₹1000.
+            if bill.to_pay >= 1000:
+                await client.call("flush_food_cart")
+                return JSONResponse({"placed": False, "reason": "too_large", "newTotal": bill.to_pay,
+                    "message": "Swiggy's beta only places orders under ₹1000 — "
+                               "use the Swiggy app for larger orders."})
+
+            # Price-drift guard: if the authoritative total moved, re-confirm.
+            expected = body.expectedTotal if body.expectedTotal is not None else opt.get("to_pay")
+            if expected is not None and abs(bill.to_pay - float(expected)) > 1.0:
+                await client.call("flush_food_cart")
+                return JSONResponse({"placed": False, "reason": "price_changed", "newTotal": bill.to_pay,
+                    "message": f"The total changed to ₹{bill.to_pay:.0f}. Review and confirm again."})
+
+            # Place. (The assistant never reaches here — user-confirmed clicks only.)
+            result = await client.call("place_food_order", addressId=addr)
+    except SwiggyClientError as e:
+        log.warning("place-order rid=%s failed: %s", rid, e)
+        return JSONResponse({"placed": False, "reason": "error",
+            "message": "Couldn't place the order just now — try again or use the Swiggy app."})
+    except Exception as e:  # noqa: BLE001
+        if _is_rate_limited(e):
+            return JSONResponse(_busy_response(rname) | {"placed": False})
+        raise
+
+    info = _order_info(result)
+    if info["status"].upper() == "PENDING_PAYMENT":   # UPI flow — NOT placed yet
+        return JSONResponse({"placed": False, "reason": "payment_pending", "order": info,
+            "message": "Payment is pending — finish it in the Swiggy app to complete the order."})
+
+    _PENDING.pop(sid, None)  # consume so it can't be double-placed
+    log.info("place-order rid=%s placed: %s", rid, info)
+    return {"placed": True, "to_pay": bill.to_pay, "order": info}
+
+
 def _line_name(line) -> str:
     item = getattr(line, "item", None)
     if item:
@@ -511,6 +608,10 @@ def _line_name(line) -> str:
 # pagination + enrichment calls on repeat budgets/visits — a big latency cut.
 _MENU_CACHE: dict[tuple[str, str], tuple[float, object]] = {}
 _MENU_TTL = 600  # seconds
+
+# Per-session stash of the exact carts behind the options we last showed, so the
+# Place Order button can rebuild precisely what the user saw (keyed by session id).
+_PENDING: dict[str, dict] = {}
 
 
 def _food_only(menu):

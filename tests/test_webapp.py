@@ -91,3 +91,23 @@ def test_optimize_rejects_bad_group_size(client):
     r = client.post("/api/optimize", json={
         "restaurantId": "1", "addressId": "1", "budget": 400, "groupSize": 0})
     assert r.status_code == 422
+
+
+# ── place-order gating (never reaches place_food_order in these paths) ──────────
+
+def test_place_order_requires_login(client):
+    r = client.post("/api/place-order", json={"optionIndex": 0, "confirmed": True})
+    assert r.status_code == 401
+
+
+def test_place_order_requires_confirmed_flag(monkeypatch, client):
+    # Bypass auth so we exercise the confirmed-flag gate specifically.
+    monkeypatch.setattr(srv, "_token", lambda request: "tok")
+    r = client.post("/api/place-order", json={"optionIndex": 0, "confirmed": False})
+    assert r.status_code == 400
+
+
+def test_place_order_without_pending_cart(monkeypatch, client):
+    monkeypatch.setattr(srv, "_token", lambda request: "tok")
+    r = client.post("/api/place-order", json={"optionIndex": 0, "confirmed": True})
+    assert r.status_code == 409  # nothing stashed for this session

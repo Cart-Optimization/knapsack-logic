@@ -129,6 +129,22 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 .veg-dot::after{content:"";position:absolute;inset:0;margin:auto;width:5px;height:5px;border-radius:50%}
 .veg-dot.v{border-color:#1a7d3c}.veg-dot.v::after{background:#1a7d3c}
 .veg-dot.n{border-color:#b3261e}.veg-dot.n::after{background:#b3261e}
+.rc-order{width:100%;margin-top:14px;background:var(--ink);color:var(--paper);font-weight:700;font-size:15px;padding:13px;border:none;border-radius:10px;cursor:pointer}
+.rc-order:hover{background:var(--flame)}
+.modal-bg{position:fixed;inset:0;background:rgba(20,14,10,.55);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal-bg.hidden{display:none}
+.modal{background:var(--paper);border-radius:18px;max-width:430px;width:100%;padding:26px;box-shadow:var(--shadow);max-height:88vh;overflow:auto}
+.modal h3{font-family:"Fraunces",serif;font-weight:800;font-size:22px;margin:0 0 14px}
+.cm-rest{font-weight:700;margin-bottom:10px}
+.cm-total{margin-top:12px;font-size:18px;font-weight:700}
+.cod-warn{background:#fdeceb;border:1px solid #f3c9c5;color:#7a1a12;border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.55;margin:16px 0}
+.cm-msg{font-size:13px;margin:0 0 12px;color:#7a1a12;font-weight:600}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+.btn-ghost{background:none;border:1.5px solid var(--ink-2);color:var(--ink);font-weight:600;padding:11px 16px;border-radius:10px;cursor:pointer}
+.btn-danger{background:var(--flame);border:none;color:#fff;font-weight:700;padding:11px 18px;border-radius:10px;cursor:pointer}
+.btn-danger:disabled{opacity:.6;cursor:default}
+.order-done{text-align:center;padding:30px 20px}
+.order-done .big{font-family:"Fraunces",serif;font-size:24px;font-weight:800;margin:10px 0 4px}
 .find{width:100%;background:var(--flame);color:#fff;font-weight:700;font-size:16px;padding:16px;
   border-radius:14px;box-shadow:var(--shadow);transition:transform .12s ease,filter .2s}
 .find:hover{filter:brightness(1.05);transform:translateY(-1px)}
@@ -267,9 +283,24 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 
 </div>
 
+<div id="confirmModal" class="modal-bg hidden">
+  <div class="modal">
+    <h3>Confirm your order</h3>
+    <div id="confirmBody"></div>
+    <div class="cod-warn">⚠️ <b>Cash on Delivery.</b> This places a <b>real order</b> on your
+      Swiggy account, payable in cash on delivery. COD orders <b>cannot be cancelled or
+      refunded</b> once placed.</div>
+    <p id="confirmMsg" class="cm-msg" style="display:none"></p>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeModal()">Cancel</button>
+      <button id="confirmGo" class="btn-danger" onclick="doPlace()">Confirm &amp; place order</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (id)=>document.getElementById(id);
-let addrCache=[], chosen=null, huntTimer=null, groupSize=1;
+let addrCache=[], chosen=null, huntTimer=null, groupSize=1, lastRes=null, placeIdx=null;
 
 function bumpGroup(d){ groupSize=Math.max(1,Math.min(20,groupSize+d)); $('groupVal').textContent=groupSize; }
 
@@ -380,11 +411,12 @@ async function optimize(){
 function render(res){
   const r=$('result');
   if(!res.found){ r.innerHTML=`<div class="panel"><p class="muted">${esc(res.message||'No cart fits that budget.')}</p></div>`; return; }
+  lastRes = res;
   const opts = res.options || [];
   const known=(res.branch_known_coupons||[]);
   const head = (res.group_size>1)?`<p class="rc-disclaimer" style="margin:0 0 10px">₹${res.per_head} per head · ${res.group_size} people · we aim for a main each</p>`:'';
   r.innerHTML = head + opts.map((o,idx)=>receiptHTML(res.restaurant, o, idx, known, res.budget)).join('')
-    + `<p class="rc-disclaimer">Open Swiggy to place it yourself — we never auto-order.${
+    + `<p class="rc-disclaimer">Placing uses <b>Cash on Delivery</b> — you'll confirm before anything is ordered.${
         known.length?` · Coupons known at this branch: <b>${known.map(esc).join(', ')}</b>`:''}</p>`;
   // count up each total
   opts.forEach((o,idx)=>{ const el=document.getElementById('cup'+idx); if(el) countUp(el, Math.round(o.bill.to_pay), 850); });
@@ -411,6 +443,7 @@ function receiptHTML(restaurant, o, idx, known, budget){
     <div class="rc-line rc-fin"><span>Delivery</span><span class="${b.free_delivery?'save':'v'}">${b.free_delivery?'FREE':'charged'}</span></div>
     <div class="rc-total"><span class="k">TO PAY</span><span class="amt">₹<span id="cup${idx}">0</span></span></div>
     <div class="rc-tags">${tags}</div>
+    <button class="rc-order" onclick="askPlace(${idx})">Place this order →</button>
     <div class="barcode"></div>
   </div>`;
 }
@@ -418,6 +451,45 @@ function receiptHTML(restaurant, o, idx, known, budget){
 function countUp(el,to,ms){ const t0=performance.now();
   function step(t){ const p=Math.min(1,(t-t0)/ms); el.textContent=Math.round(to*(1-Math.pow(1-p,3))); if(p<1)requestAnimationFrame(step); }
   requestAnimationFrame(step); }
+
+function askPlace(idx){
+  if(!lastRes||!lastRes.options||!lastRes.options[idx]) return;
+  placeIdx=idx; const o=lastRes.options[idx];
+  $('confirmBody').innerHTML = `<div class="cm-rest">${esc(lastRes.restaurant)}</div>`
+    + o.items.map(it=>`<div class="rc-line"><span>${vegDot(it.veg)}<span class="q">${it.qty}×</span> ${esc(it.name)}</span></div>`).join('')
+    + `<div class="cm-total">To pay ₹${Math.round(o.bill.to_pay)}</div>`;
+  const m=$('confirmMsg'); m.style.display='none'; m.textContent='';
+  const btn=$('confirmGo'); btn.disabled=false; btn.textContent='Confirm & place order';
+  $('confirmModal').classList.remove('hidden');
+}
+function closeModal(){ $('confirmModal').classList.add('hidden'); }
+async function doPlace(){
+  if(placeIdx==null) return;
+  const o=lastRes.options[placeIdx], btn=$('confirmGo'), msg=$('confirmMsg');
+  btn.disabled=true; btn.textContent='Placing…'; msg.style.display='none';
+  try{
+    const res = await fetch('/api/place-order',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({optionIndex:placeIdx, confirmed:true, expectedTotal:o.bill.to_pay})}).then(r=>r.json());
+    if(res.placed){ closeModal(); showOrderPlaced(res); return; }
+    // Not placed: drift / busy / too-large / pending — show inline, let the user decide.
+    if(res.reason==='price_changed' && res.newTotal){
+      o.bill.to_pay=res.newTotal;
+      const t=$('confirmBody').querySelector('.cm-total'); if(t) t.textContent=`To pay ₹${Math.round(res.newTotal)}`;
+    }
+    msg.textContent=res.message||'Could not place the order.'; msg.style.display='block';
+    btn.disabled=false; btn.textContent='Confirm & place order';
+  }catch(e){
+    msg.textContent='Something went wrong placing the order. Please try again.'; msg.style.display='block';
+    btn.disabled=false; btn.textContent='Confirm & place order';
+  }
+}
+function showOrderPlaced(res){
+  const oid=(res.order&&res.order.order_id)?` · #${esc(res.order.order_id)}`:'';
+  $('result').innerHTML=`<div class="panel order-done"><div style="font-size:34px">✅</div>
+    <div class="big">Order placed${oid}</div>
+    <p class="muted">₹${Math.round(res.to_pay)} · Cash on Delivery. Track it in the Swiggy app.</p></div>`;
+  $('result').scrollIntoView({behavior:'smooth',block:'start'});
+}
 
 async function logout(){ await fetch('/logout',{method:'POST'}); location.reload(); }
 function vegDot(v){ return v===true?'<span class="veg-dot v" title="veg"></span>':v===false?'<span class="veg-dot n" title="non-veg"></span>':''; }
