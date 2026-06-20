@@ -117,9 +117,18 @@ input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:99
   background:linear-gradient(90deg,var(--flame) var(--pct,40%),var(--line-2) var(--pct,40%));outline:none;margin:6px 0 16px}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;
   background:var(--flame);border:3px solid var(--paper-2);box-shadow:var(--shadow);cursor:grab}
-.drinkrow{display:flex;align-items:center;gap:10px;margin:2px 0 14px;font-size:14px;font-weight:600;cursor:pointer}
+.drinkrow{display:flex;align-items:center;gap:10px;margin:2px 0 12px;font-size:14px;font-weight:600;cursor:pointer}
 .drinkrow input{width:18px;height:18px;accent-color:var(--flame);cursor:pointer}
 .drinkrow em{font-style:normal;color:var(--ink-2);font-weight:400}
+.grouprow{display:flex;align-items:center;justify-content:space-between;margin:2px 0 14px;font-size:14px;font-weight:600}
+.stepper{display:flex;align-items:center;gap:14px}
+.stepper button{width:30px;height:30px;border-radius:50%;border:1.5px solid var(--ink-2);background:var(--paper);color:var(--ink);font-size:18px;font-weight:700;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.stepper button:hover{border-color:var(--flame);color:var(--flame)}
+.stepper #groupVal{min-width:18px;text-align:center;font-variant-numeric:tabular-nums}
+.veg-dot{display:inline-block;width:11px;height:11px;border:1.5px solid;border-radius:2px;margin-right:6px;position:relative;vertical-align:middle}
+.veg-dot::after{content:"";position:absolute;inset:0;margin:auto;width:5px;height:5px;border-radius:50%}
+.veg-dot.v{border-color:#1a7d3c}.veg-dot.v::after{background:#1a7d3c}
+.veg-dot.n{border-color:#b3261e}.veg-dot.n::after{background:#b3261e}
 .find{width:100%;background:var(--flame);color:#fff;font-weight:700;font-size:16px;padding:16px;
   border-radius:14px;box-shadow:var(--shadow);transition:transform .12s ease,filter .2s}
 .find:hover{filter:brightness(1.05);transform:translateY(-1px)}
@@ -238,6 +247,16 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
         <button class="preset" data-v="800">₹800</button>
       </div>
       <input id="budget" type="range" min="100" max="1000" step="20" value="400" oninput="onBudgetSlide()"/>
+      <div class="grouprow">
+        <span>For how many people?</span>
+        <div class="stepper">
+          <button type="button" onclick="bumpGroup(-1)" aria-label="fewer">−</button>
+          <span id="groupVal">1</span>
+          <button type="button" onclick="bumpGroup(1)" aria-label="more">+</button>
+        </div>
+      </div>
+      <label class="drinkrow"><input id="vegToggle" type="checkbox"/>
+        <span>Vegetarian only <em>— only items marked pure-veg</em></span></label>
       <label class="drinkrow"><input id="drinkToggle" type="checkbox"/>
         <span>Include a drink <em>— we'll get it the cheapest way, usually as a meal</em></span></label>
       <button id="goBtn" class="find" onclick="optimize()">Find my best cart →</button>
@@ -250,7 +269,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 
 <script>
 const $ = (id)=>document.getElementById(id);
-let addrCache=[], chosen=null, huntTimer=null;
+let addrCache=[], chosen=null, huntTimer=null, groupSize=1;
+
+function bumpGroup(d){ groupSize=Math.max(1,Math.min(20,groupSize+d)); $('groupVal').textContent=groupSize; }
 
 async function boot(){
   const me = await fetch('/api/me').then(r=>r.json()).catch(()=>({logged_in:false}));
@@ -350,7 +371,7 @@ async function optimize(){
   r.scrollIntoView({behavior:'smooth',block:'start'});
   try{
     const res = await fetch('/api/optimize',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({restaurantId:chosen.id,restaurantName:chosen.name,addressId:$('address').value,budget:+$('budget').value,drinks:$('drinkToggle').checked})}).then(r=>r.json());
+      body:JSON.stringify({restaurantId:chosen.id,restaurantName:chosen.name,addressId:$('address').value,budget:+$('budget').value,drinks:$('drinkToggle').checked,vegOnly:$('vegToggle').checked,groupSize:groupSize})}).then(r=>r.json());
     clearInterval(huntTimer); render(res);
   }catch(e){ clearInterval(huntTimer); r.innerHTML=`<div class="panel"><p class="err">Something went wrong: ${esc(String(e))}</p></div>`; }
   finally{ $('goBtn').disabled=false; }
@@ -361,7 +382,8 @@ function render(res){
   if(!res.found){ r.innerHTML=`<div class="panel"><p class="muted">${esc(res.message||'No cart fits that budget.')}</p></div>`; return; }
   const opts = res.options || [];
   const known=(res.branch_known_coupons||[]);
-  r.innerHTML = opts.map((o,idx)=>receiptHTML(res.restaurant, o, idx, known, res.budget)).join('')
+  const head = (res.group_size>1)?`<p class="rc-disclaimer" style="margin:0 0 10px">₹${res.per_head} per head · ${res.group_size} people · we aim for a main each</p>`:'';
+  r.innerHTML = head + opts.map((o,idx)=>receiptHTML(res.restaurant, o, idx, known, res.budget)).join('')
     + `<p class="rc-disclaimer">Open Swiggy to place it yourself — we never auto-order.${
         known.length?` · Coupons known at this branch: <b>${known.map(esc).join(', ')}</b>`:''}</p>`;
   // count up each total
@@ -371,7 +393,7 @@ function render(res){
 function receiptHTML(restaurant, o, idx, known, budget){
   const b=o.bill, saved=Math.round(b.coupon_discount||0);
   const stretch = o.kind==='stretch';
-  const lines=o.items.map(it=>`<div class="rc-line"><span><span class="q">${it.qty}×</span> ${esc(it.name)}</span></div>`).join('');
+  const lines=o.items.map(it=>`<div class="rc-line"><span>${vegDot(it.veg)}<span class="q">${it.qty}×</span> ${esc(it.name)}</span></div>`).join('');
   const tags=[ b.free_delivery?`<span class="tag good">free delivery</span>`:'',
     b.cod?`<span class="tag good">COD ✓</span>`:`<span class="tag">card only</span>`,
     b.coupon?`<span class="tag good">${esc(b.coupon)}</span>`:`<span class="tag">no coupon needed</span>` ].filter(Boolean).join('');
@@ -398,6 +420,7 @@ function countUp(el,to,ms){ const t0=performance.now();
   requestAnimationFrame(step); }
 
 async function logout(){ await fetch('/logout',{method:'POST'}); location.reload(); }
+function vegDot(v){ return v===true?'<span class="veg-dot v" title="veg"></span>':v===false?'<span class="veg-dot n" title="non-veg"></span>':''; }
 function esc(s){ return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function attr(o){ return JSON.stringify(JSON.stringify(o)).replace(/'/g,'&#39;'); }
 boot();

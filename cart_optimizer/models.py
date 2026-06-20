@@ -152,12 +152,15 @@ class Item:
     time_window: tuple[str, str] | None = None
     addons: tuple[AddonGroup, ...] = ()
     max_quantity: int = 1  # ordering several of one item is opt-in
+    is_veg: bool | None = None  # True=veg, False=non-veg, None=unknown
 
     def __post_init__(self) -> None:
         _require_id(self.id, ITEM_PREFIX)
         pref = _require_number(self.preference, f"item {self.id}: preference")
         if not 0.0 <= pref <= MAX_PREFERENCE:
             raise MenuError(f"item {self.id}: preference must be in [0, {MAX_PREFERENCE}], got {pref}")
+        if self.is_veg is not None and not isinstance(self.is_veg, bool):
+            raise MenuError(f"item {self.id}: is_veg must be bool or None")
         object.__setattr__(self, "variants", tuple(self.variants))
         if not self.variants:
             raise MenuError(f"item {self.id}: needs at least one variant")

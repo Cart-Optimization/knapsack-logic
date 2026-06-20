@@ -49,6 +49,7 @@ __all__ = [
     "is_drink_item",
     "contains_drink",
     "is_beverage_led",
+    "classify_veg",
 ]
 
 DEFAULT_PREFERENCE = 0.6
@@ -419,6 +420,34 @@ def _parse_variation_groups(
     return tuple(variants), tuple(addon_groups)
 
 
+def classify_veg(raw: Mapping[str, Any]) -> bool | None:
+    """Best-effort veg classification from a Swiggy menu item.
+
+    Compact menu items carry a boolean ``isVeg``; other shapes use 1/2 or strings.
+    Returns True (veg), False (non-veg), or None (unknown — caller decides how to
+    treat it; under a veg-only filter we exclude unknowns to stay safe)."""
+    val = raw.get("isVeg")
+    if val is None:
+        val = raw.get("is_veg")
+    if val is None:
+        return None
+    if isinstance(val, bool):          # must precede int — bool is a subclass of int
+        return val
+    if isinstance(val, (int, float)):
+        if val == 1:
+            return True
+        if val in (0, 2):
+            return False
+        return None
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("1", "true", "veg", "yes"):
+            return True
+        if v in ("2", "0", "false", "nonveg", "non-veg", "no"):
+            return False
+    return None
+
+
 def _parse_item(
     raw: Mapping[str, Any],
     addons_by_id: Mapping[str, list[Mapping[str, Any]]],
@@ -435,6 +464,7 @@ def _parse_item(
     base_cost = _round_price(raw.get("price"), f"item {raw_id}")
     addon_detail = addons_by_id.get(raw_id, [])
     pref = _preference(raw, category_title, beverage_is_main)  # down-weights sides/desserts/drinks
+    veg = classify_veg(raw)
 
     # Resolve variant detail: prefer variantsV2 (BK/newer), else legacy variations
     # (Starbucks). Detail comes from search_menu (merged in by id) or, for tests,
@@ -470,6 +500,7 @@ def _parse_item(
                 variants=parsed_variants,
                 available=bool(raw.get("inStock", 1)),
                 addons=all_addons,
+                is_veg=veg,
             )
         except MenuError as exc:
             raise SwiggyAdapterError(f"item {raw_id}: {exc}") from exc
@@ -483,6 +514,7 @@ def _parse_item(
             variants=(Variant(id=f"var_{raw_id}", name="Standard", cost=base_cost),),
             available=bool(raw.get("inStock", 1)),
             addons=parse_addon_groups(addon_detail),
+            is_veg=veg,
         )
     except MenuError as exc:
         raise SwiggyAdapterError(f"item {raw_id}: {exc}") from exc

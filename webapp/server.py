@@ -280,6 +280,8 @@ class OptimizeRequest(BaseModel):
     budget: float = Field(gt=0, le=100_000)
     restaurantName: str = ""
     drinks: bool = False
+    vegOnly: bool = False
+    groupSize: int = Field(default=1, ge=1, le=20)
 
 
 @app.post("/api/optimize")
@@ -290,7 +292,10 @@ async def optimize(request: Request, body: OptimizeRequest):
     budget = float(body.budget)
     rname = body.restaurantName
     want_drinks = body.drinks
-    log.info("optimize start rid=%s name=%r budget=%.0f drinks=%s", rid, rname, budget, want_drinks)
+    veg_only = body.vegOnly
+    group_size = body.groupSize
+    log.info("optimize start rid=%s name=%r budget=%.0f drinks=%s veg=%s group=%d",
+             rid, rname, budget, want_drinks, veg_only, group_size)
 
     verified: list[VerifiedCart] = []
     built = 0            # candidates that produced an authoritative bill (cart truly built)
@@ -307,6 +312,16 @@ async def optimize(request: Request, body: OptimizeRequest):
             # parts) so the optimizer prefers it over à-la-carte.
             if not want_drinks:
                 menu = _food_only(menu)
+
+            # Veg-only filter (fail safe): keep only items confirmed veg. Swiggy
+            # marks veg items isVeg=true but often OMITS the flag on non-veg, so we
+            # exclude unknowns too — never serve a veg user something unverified.
+            if veg_only:
+                menu = _veg_only(menu)
+                if not menu.items:
+                    who = rname or "this restaurant"
+                    return JSONResponse({"found": False, "restaurant": rname,
+                                         "message": f"No vegetarian items found at {who}."})
 
             # Calibrate to REAL prices: read each item's actual final_price from a
             # probe cart (Swiggy item-level discounts make our list prices too high)
@@ -416,18 +431,25 @@ async def optimize(request: Request, body: OptimizeRequest):
         return JSONResponse({"found": False, "restaurant": rname,
                              "message": f"No cart fits ₹{budget:.0f}."})
 
-    option1 = max(within, key=lambda v: (v.preference, -v.bill.to_pay))
+    # Group size: prefer carts that field at least one "main" per person (mains =
+    # higher-preference items, not sides), then by total preference / lower price.
+    def _rank(v):
+        return (_main_count(v.cart) >= group_size, v.preference, -v.bill.to_pay)
+
+    option1 = max(within, key=_rank)
     options = [_option(option1, budget, "within")]
 
     # Option 2: the best cart in the buffer zone, but only if it clearly beats
     # option 1's value for that small overage (else two near-identical carts).
-    stretch_best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
+    stretch_best = max(verified, key=_rank)
     if (stretch_best.bill.to_pay > budget + 0.5
             and stretch_best.preference > option1.preference + 1e-6):
         options.append(_option(stretch_best, budget, "stretch"))
 
     return {"found": True, "restaurant": rname,
-            "budget": budget, "options": options,
+            "budget": budget, "group_size": group_size,
+            "per_head": round(budget / group_size),
+            "options": options,
             "branch_known_coupons": ledger.known(rid)}
 
 
@@ -438,12 +460,26 @@ def _busy_response(restaurant: str) -> dict:
             "message": "Swiggy is busy right now — please try again in a moment."}
 
 
+MAIN_PREFERENCE_THRESHOLD = 0.6  # items at/above this read as a "main", not a side
+
+
+def _main_count(cart) -> int:
+    """How many lines are 'mains' (vs sides/drinks) — used to satisfy group size."""
+    return sum(1 for l in cart.lines if l.preference >= MAIN_PREFERENCE_THRESHOLD)
+
+
+def _line_veg(line):
+    item = getattr(line, "item", None)
+    return getattr(item, "is_veg", None) if item is not None else None
+
+
 def _option(v: VerifiedCart, budget: float, kind: str) -> dict:
     return {
         "kind": kind,
         "over": max(0, round(v.bill.to_pay - budget)),
         "preference": round(v.preference, 2),
-        "items": [{"name": _line_name(l), "qty": l.quantity} for l in v.cart.lines],
+        "items": [{"name": _line_name(l), "qty": l.quantity, "veg": _line_veg(l)}
+                  for l in v.cart.lines],
         "bill": {
             "to_pay": v.bill.to_pay,
             "item_total": v.bill.item_total,
@@ -488,6 +524,16 @@ def _food_only(menu):
     if not kept:
         return menu   # never strip everything (e.g. a cafe) — fall back to full menu
     return dataclasses.replace(menu, items=kept, combos=combos)
+
+
+def _veg_only(menu):
+    """Keep only items confirmed veg (is_veg is True). Fail safe: items with
+    unknown/missing veg metadata are excluded (Swiggy often omits the flag on
+    non-veg items). Combos carry no veg metadata, so they're dropped under
+    veg-only. May return an empty item list — the caller handles that."""
+    import dataclasses
+    kept = tuple(i for i in menu.items if i.is_veg is True)
+    return dataclasses.replace(menu, items=kept, combos=())
 
 
 async def _get_menu_cached(client, rid: str, addr: str):
