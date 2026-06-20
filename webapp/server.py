@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import time
@@ -26,6 +27,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
 from cart_optimizer.coupon_ledger import SqliteCouponLedger
@@ -38,7 +40,7 @@ from cart_optimizer.discovery import (
 from cart_optimizer.run import (
     _fetch_full_menu, _enrich_menu_detail, _verify_one, discover_prices,
 )
-from cart_optimizer.swiggy_client import SwiggyClient
+from cart_optimizer.swiggy_client import SwiggyClient, SwiggyClientError, _is_rate_limited
 from . import oauth
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -46,15 +48,34 @@ COUPON_DB = os.getenv("COUPON_DB", "./data/coupons.db")
 SESSION_FILE = Path(os.getenv("SESSION_FILE", "./data/sessions.json"))
 CONFIG = PricingConfig(delivery_fee=30, platform_fee=5, gst_rate=0.05)
 BUDGET_BUFFER = 0.15   # option 2 may exceed budget by up to 15% if it's far better value
+TOKEN_REFRESH_SKEW = 60   # refresh an access token this many seconds before it expires
 
 # Chains we've validated end-to-end; "restaurants our service provides".
 SUPPORTED_BRANDS = ["McDonald's", "Burger King", "Starbucks", "Taco Bell", "KFC", "Domino's"]
+
+# Observability: a single logger for the web layer. basicConfig is a no-op if the
+# host (e.g. uvicorn) already installed root handlers, so this just guarantees our
+# records reach a handler when run standalone.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+log = logging.getLogger("cartoptimizer.web")
 
 app = FastAPI(title="Cart Optimizer")
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", secrets.token_hex(32)))
 
 # Shared coupon ledger — one DB for ALL users of this backend.
 ledger = SqliteCouponLedger(COUPON_DB)
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """Last-resort handler: log the real error, return a clean JSON 500 to the
+    client (never leak a traceback). HTTPException / validation errors keep their
+    own handlers — this only catches genuinely unexpected failures."""
+    log.exception("unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse({"error": "internal server error"}, status_code=500)
 
 
 # Server-side session store: cookie holds only an opaque sid; tokens stay here.
@@ -89,10 +110,33 @@ def _session(request: Request) -> dict | None:
     return _SESSIONS.get(sid) if sid else None
 
 
+def _store_tokens(sess: dict, tokens: dict) -> None:
+    """Record a token response and when its access_token expires."""
+    sess.update(tokens)
+    try:
+        ttl = float(tokens.get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        ttl = 3600.0
+    sess["expires_at"] = time.time() + ttl
+
+
 def _token(request: Request) -> str:
+    """Return a usable access token for this session, proactively refreshing it
+    via the stored refresh_token when it's at/near expiry. Without a refresh
+    token we hand back the current one and let the upstream 401 surface."""
     sess = _session(request)
     if not sess or "access_token" not in sess:
         raise HTTPException(status_code=401, detail="not logged in")
+    expires_at = sess.get("expires_at", 0)
+    if (expires_at and expires_at - time.time() < TOKEN_REFRESH_SKEW
+            and sess.get("refresh_token")):
+        try:
+            tokens = oauth.refresh(sess["refresh_token"], sess.get("client_id", ""))
+            _store_tokens(sess, tokens)
+            _save_sessions()
+            log.info("refreshed access token")
+        except Exception:  # noqa: BLE001 — refresh is best-effort; fall back to old token
+            log.warning("token refresh failed; using existing token", exc_info=True)
     return sess["access_token"]
 
 
@@ -126,8 +170,9 @@ def callback(request: Request, code: str | None = None, state: str | None = None
         return HTMLResponse(f"<h3>Token exchange failed: {e}</h3><a href='/'>back</a>",
                             status_code=400)
     sess.pop("pkce", None)
-    sess.update(tokens)
+    _store_tokens(sess, tokens)
     _save_sessions()
+    log.info("login complete (client_id=%s)", sess.get("client_id"))
     return RedirectResponse("/")
 
 
@@ -227,110 +272,147 @@ async def nearby(request: Request, addressId: str):
     return rows[:12]
 
 
+class OptimizeRequest(BaseModel):
+    """Validated body for /api/optimize. FastAPI returns a 422 automatically when
+    a field is missing or out of range, so the handler only sees sane input."""
+    restaurantId: str = Field(min_length=1)
+    addressId: str = Field(min_length=1)
+    budget: float = Field(gt=0, le=100_000)
+    restaurantName: str = ""
+    drinks: bool = False
+
+
 @app.post("/api/optimize")
-async def optimize(request: Request):
+async def optimize(request: Request, body: OptimizeRequest):
     token = _token(request)
-    body = await request.json()
-    rid = str(body["restaurantId"])
-    addr = str(body["addressId"])
-    budget = float(body["budget"])
-    rname = str(body.get("restaurantName", ""))
-    want_drinks = bool(body.get("drinks", False))
+    rid = body.restaurantId
+    addr = body.addressId
+    budget = float(body.budget)
+    rname = body.restaurantName
+    want_drinks = body.drinks
+    log.info("optimize start rid=%s name=%r budget=%.0f drinks=%s", rid, rname, budget, want_drinks)
 
-    async with SwiggyClient(token) as client:
-        menu = await _get_menu_cached(client, rid, addr)
-        if not rname:
-            rname = menu.restaurant
+    verified: list[VerifiedCart] = []
+    built = 0            # candidates that produced an authoritative bill (cart truly built)
+    rate_limited = False  # a probe failed specifically because Swiggy rate-limited us
+    try:
+        async with SwiggyClient(token) as client:
+            menu = await _get_menu_cached(client, rid, addr)
+            if not rname:
+                rname = menu.restaurant
 
-        # Drinks toggle (default OFF): if the user doesn't want a drink, strip
-        # standalone drinks AND meals/combos (which bundle a drink) so the cart is
-        # pure food and nothing auto-adds a drink. ON: keep them — a meal is valued
-        # as a bundle (worth its parts) so the optimizer prefers it over à-la-carte.
-        if not want_drinks:
-            menu = _food_only(menu)
+            # Drinks toggle (default OFF): if the user doesn't want a drink, strip
+            # standalone drinks AND meals/combos (which bundle a drink) so the cart
+            # is pure food. ON: keep them — a meal is valued as a bundle (worth its
+            # parts) so the optimizer prefers it over à-la-carte.
+            if not want_drinks:
+                menu = _food_only(menu)
 
-        # Calibrate to REAL prices: read each item's actual final_price from a probe
-        # cart (Swiggy item-level discounts make our list prices too high), so the
-        # optimizer fills the real budget instead of stopping early.
-        real = await discover_prices(client, rid, rname, addr, menu, budget)
-        if real:
-            menu = apply_real_prices(menu, real)
+            # Calibrate to REAL prices: read each item's actual final_price from a
+            # probe cart (Swiggy item-level discounts make our list prices too high)
+            # so the optimizer fills the real budget instead of stopping early.
+            real = await discover_prices(client, rid, rname, addr, menu, budget)
+            if real:
+                menu = apply_real_prices(menu, real)
 
-        # We show TWO carts: option 1 strictly within budget, option 2 a small
-        # "worth the stretch" buffer (up to +BUFFER) shown only when a notably
-        # higher-value cart just misses budget. So we verify up to the stretch
-        # ceiling and pick both from the same pool.
-        stretch = budget * (1 + BUDGET_BUFFER)
-        candidates = propose_candidates(menu, User(), CONFIG, stretch, max_candidates=5)
+            # We show TWO carts: option 1 strictly within budget, option 2 a small
+            # "worth the stretch" buffer. Verify up to the stretch ceiling and pick
+            # both from the same pool. (Candidate count kept small to limit calls.)
+            stretch = budget * (1 + BUDGET_BUFFER)
+            candidates = propose_candidates(menu, User(), CONFIG, stretch, max_candidates=3)
 
-        # Coupon strategy (minimal calls, only ones with a real chance): every cart
-        # tries its auto-SUGGESTED + this branch's known coupons; a small discovery
-        # list runs only on the first cart at a never-seen branch.
-        learned = bool(ledger.known(rid))
-        seen_keys: set = set()
+            # Coupon strategy (minimal calls): every cart tries its auto-SUGGESTED +
+            # this branch's known coupons; a small discovery list runs only on the
+            # first cart at a never-seen branch.
+            learned = bool(ledger.known(rid))
+            seen_keys: set = set()
 
-        async def verify_candidates(carts, allow_discovery):
-            out: list[VerifiedCart] = []
-            for i, cart in enumerate(carts):
-                key = tuple(sorted((l.product_id, l.quantity) for l in cart.lines))
-                if not cart.lines or key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                discovery = allow_discovery and i == 0 and not learned
-                coupons = list(DEFAULT_COUPON_CANDIDATES) if discovery else []
-                try:
-                    bill = await _verify_one(cart, client, rid, rname, addr, coupons, ledger=ledger)
-                except Exception:  # noqa: BLE001
-                    continue
-                if bill.to_pay <= stretch:        # keep everything up to the stretch ceiling
-                    out.append(VerifiedCart(cart, bill))
-            return out
-
-        verified = await verify_candidates(candidates, allow_discovery=True)
-
-        # Greedy top-up toward the stretch ceiling: add the best affordable main and
-        # re-verify while it fits + improves. The pool keeps every intermediate cart,
-        # so we can still pick the best strictly-within-budget one afterward.
-        if verified:
-            best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
-            addable = sorted(
-                [i for i in menu.orderable_items()
-                 if min(v.cost for v in i.variants) <= stretch],
-                key=lambda i: i.preference, reverse=True)
-            for _ in range(3):
-                headroom = stretch - best.bill.to_pay
-                if headroom < 40:
-                    break
-                in_cart = {l.product_id for l in best.cart.lines}
-                added = False
-                for item in addable:
-                    if item.id in in_cart:
-                        continue
-                    line = ItemLine(item, min(item.variants, key=lambda v: v.cost))
-                    if line.cost > headroom * 1.4:
-                        continue
-                    try:
-                        cart = Cart(best.cart.lines + (line,))
-                    except Exception:  # noqa: BLE001
-                        continue
+            async def verify_candidates(carts, allow_discovery):
+                nonlocal built, rate_limited
+                out: list[VerifiedCart] = []
+                for i, cart in enumerate(carts):
                     key = tuple(sorted((l.product_id, l.quantity) for l in cart.lines))
-                    if key in seen_keys:
+                    if not cart.lines or key in seen_keys:
                         continue
                     seen_keys.add(key)
+                    discovery = allow_discovery and i == 0 and not learned
+                    coupons = list(DEFAULT_COUPON_CANDIDATES) if discovery else []
                     try:
-                        bill = await _verify_one(cart, client, rid, rname, addr, [], ledger=ledger)
-                    except Exception:  # noqa: BLE001
+                        bill = await _verify_one(cart, client, rid, rname, addr, coupons, ledger=ledger)
+                    except Exception as e:  # noqa: BLE001 — one bad cart shouldn't sink the request
+                        rate_limited = rate_limited or _is_rate_limited(e)
+                        log.warning("verify failed (rid=%s cart=%s): %s", rid, key, e)
                         continue
-                    if bill.to_pay <= stretch and sum(l.preference for l in cart.lines) > best.preference:
-                        best = VerifiedCart(cart, bill)
-                        verified.append(best)
-                        added = True
+                    built += 1
+                    if bill.to_pay <= stretch:        # keep everything up to the stretch ceiling
+                        out.append(VerifiedCart(cart, bill))
+                return out
+
+            verified = await verify_candidates(candidates, allow_discovery=True)
+
+            # Greedy top-up toward the stretch ceiling: add the best affordable main
+            # and re-verify while it fits + improves. The pool keeps every
+            # intermediate cart, so we can still pick the best within-budget one.
+            if verified:
+                best = max(verified, key=lambda v: (v.preference, -v.bill.to_pay))
+                addable = sorted(
+                    [i for i in menu.orderable_items()
+                     if min(v.cost for v in i.variants) <= stretch],
+                    key=lambda i: i.preference, reverse=True)
+                for _ in range(2):
+                    headroom = stretch - best.bill.to_pay
+                    if headroom < 40:
                         break
-                if not added:
-                    break
+                    in_cart = {l.product_id for l in best.cart.lines}
+                    added = False
+                    for item in addable:
+                        if item.id in in_cart:
+                            continue
+                        line = ItemLine(item, min(item.variants, key=lambda v: v.cost))
+                        if line.cost > headroom * 1.4:
+                            continue
+                        try:
+                            cart = Cart(best.cart.lines + (line,))
+                        except Exception:  # noqa: BLE001 — e.g. dup product; just skip this item
+                            continue
+                        key = tuple(sorted((l.product_id, l.quantity) for l in cart.lines))
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        try:
+                            bill = await _verify_one(cart, client, rid, rname, addr, [], ledger=ledger)
+                        except Exception as e:  # noqa: BLE001 — top-up probe failed; keep best
+                            rate_limited = rate_limited or _is_rate_limited(e)
+                            log.warning("top-up verify failed (rid=%s cart=%s): %s", rid, key, e)
+                            continue
+                        if bill.to_pay <= stretch and sum(l.preference for l in cart.lines) > best.preference:
+                            best = VerifiedCart(cart, bill)
+                            verified.append(best)
+                            added = True
+                            break
+                    if not added:
+                        break
+    except SwiggyClientError as e:
+        log.warning("optimize rid=%s aborted (Swiggy error): %s", rid, e)
+        return JSONResponse(_busy_response(rname))
+    except Exception as e:  # noqa: BLE001
+        if _is_rate_limited(e):
+            log.warning("optimize rid=%s aborted (rate-limited)", rid)
+            return JSONResponse(_busy_response(rname))
+        raise  # genuinely unexpected → global handler → clean 500
+
+    log.info("optimize rid=%s done: %d built, %d within-stretch, %d within-budget",
+             rid, built, len(verified), sum(1 for v in verified if v.bill.to_pay <= budget + 0.5))
 
     within = [v for v in verified if v.bill.to_pay <= budget + 0.5]
     if not within:
+        if rate_limited and built == 0:
+            return JSONResponse(_busy_response(rname))
+        if built == 0:   # carts never built (e.g. items not addable at this store)
+            who = rname or "this restaurant"
+            return JSONResponse({"found": False, "restaurant": rname,
+                                 "message": f"We couldn't build a cart at {who} — "
+                                            "it may not be fully supported yet."})
         return JSONResponse({"found": False, "restaurant": rname,
                              "message": f"No cart fits ₹{budget:.0f}."})
 
@@ -347,6 +429,13 @@ async def optimize(request: Request):
     return {"found": True, "restaurant": rname,
             "budget": budget, "options": options,
             "branch_known_coupons": ledger.known(rid)}
+
+
+def _busy_response(restaurant: str) -> dict:
+    """Clean, retryable payload when Swiggy rate-limits / the transport fails —
+    shown to the user instead of a 500."""
+    return {"found": False, "restaurant": restaurant,
+            "message": "Swiggy is busy right now — please try again in a moment."}
 
 
 def _option(v: VerifiedCart, budget: float, kind: str) -> dict:

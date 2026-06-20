@@ -1,0 +1,20 @@
+# Keep the Docker build context small + the image clean.
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.git/
+.gitignore
+tests/
+data/
+*.db
+coupons.json
+requirements-dev.txt
+BUILD_LOG.md
+DEPLOY.md
+README.md
+.DS_Store
+swiggy_auth_dev.py
