@@ -147,7 +147,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 .btn-danger:disabled{opacity:.6;cursor:default}
 .order-done{text-align:center;padding:30px 20px}
 .order-done .big{font-family:"Fraunces",serif;font-size:24px;font-weight:800;margin:10px 0 4px}
-.cstat{text-align:center;color:var(--ink-2);font-size:13px;margin:26px auto 10px;max-width:560px;line-height:1.5}
+.cstat{color:var(--ink-2);font-size:12.5px;margin:8px 4px 0;line-height:1.5}
 .cstat b{color:var(--ink)}
 .cta-ghost{display:inline-block;margin:12px 0 0 14px;background:none;border:1.5px solid var(--ink);color:var(--ink);font-weight:700;font-size:15px;padding:13px 22px;border-radius:12px;cursor:pointer}
 .cta-ghost:hover{border-color:var(--flame);color:var(--flame)}
@@ -227,15 +227,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
   .hero p{margin-bottom:24px}
   .hero-preview{display:block;grid-column:2}
   .hero .marquee{grid-column:1 / -1;margin-top:30px}
-  .workspace{display:grid;grid-template-columns:372px 1fr;gap:24px;align-items:start}
-  .rail{position:sticky;top:24px;display:flex;flex-direction:column;gap:16px}
+  .workspace.has-pick{display:grid;grid-template-columns:372px 1fr;gap:24px;align-items:start}
+  .rail{display:flex;flex-direction:column;gap:16px}
+  .workspace.has-pick .rail{position:sticky;top:24px}
   .rail .panel{margin-bottom:0}
   .stage{min-width:0;display:flex;flex-direction:column;gap:16px}
   .stage .panel{margin-bottom:0}
   .rgrid{grid-template-columns:1fr 1fr}
   .receipts{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:20px;align-items:start}
   .receipts .receipt{margin-bottom:0}
-  .cstat{margin-top:32px}
 }
 
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
@@ -293,20 +293,20 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 
     <div id="demoBanner" class="demobar hidden">🧪 <b>Demo mode</b> — real engine on a sample menu, estimated totals, no real order is placed. Live Swiggy ordering works when run <b>locally</b>; the hosted version is in progress (Swiggy builder program).</div>
 
-    <div class="workspace">
-      <aside class="rail">
-        <div id="addrPanel" class="panel">
-          <p class="label">Deliver to</p>
-          <div class="field">
-            <select id="address" onchange="onAddrChange()"></select>
-            <button class="btn ghost" style="flex:0 0 auto" onclick="useMyLocation()">📍 Locate me</button>
-          </div>
-          <p id="geo" class="geo"></p>
-        </div>
+    <div id="addrPanel" class="panel">
+      <p class="label">Deliver to</p>
+      <div class="field">
+        <select id="address" onchange="onAddrChange()"></select>
+        <button class="btn ghost" style="flex:0 0 auto" onclick="useMyLocation()">📍 Locate me</button>
+      </div>
+      <p id="geo" class="geo"></p>
+    </div>
 
+    <div id="workspace" class="workspace">
+      <aside class="rail">
         <div id="budgetPanel" class="panel hidden">
           <div class="budget-head">
-            <p class="label" style="margin:0">Budget at <span id="chosenName" style="color:var(--flame)"></span></p>
+            <p class="label" style="margin:0">Budget at <span id="chosenName" style="color:var(--flame)"></span> <button class="btn ghost" style="padding:0;font-size:12px;margin-left:8px" onclick="clearPick()">(change)</button></p>
             <div class="budget-val">₹<span id="budgetVal">400</span></div>
           </div>
           <div class="presets">
@@ -349,9 +349,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
         <div id="result"></div>
       </main>
     </div>
+    <p id="couponStat" class="cstat hidden"></p>
   </section>
-  <p id="couponStat" class="cstat hidden"></p>
-
 </div>
 
 <div id="confirmModal" class="modal-bg hidden">
@@ -383,6 +382,7 @@ function startDemo(){
   $('demoBanner').classList.remove('hidden');
   $('addrPanel').classList.add('hidden');      // demo skips address + restaurant pick
   $('nearbyPanel').classList.add('hidden');
+  $('workspace').classList.add('has-pick');
   chosen={id:'demo', name:'Pizza Palace (demo)'};
   $('chosenName').textContent=chosen.name;
   $('budgetPanel').classList.remove('hidden');
@@ -472,8 +472,19 @@ function pick(s){
   chosen = (typeof s==='string')?JSON.parse(s):s;
   $('chosenName').textContent = chosen.name;
   $('budgetPanel').classList.remove('hidden');
+  $('nearbyPanel').classList.add('hidden');
+  $('workspace').classList.add('has-pick');
   $('result').innerHTML='';
   $('budgetPanel').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+function clearPick(){
+  chosen = null;
+  $('budgetPanel').classList.add('hidden');
+  $('nearbyPanel').classList.remove('hidden');
+  $('workspace').classList.remove('has-pick');
+  $('result').innerHTML='';
+  if(!demoMode) $('nearbyPanel').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
 /* budget controls */
