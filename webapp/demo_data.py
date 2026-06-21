@@ -36,8 +36,7 @@ DEMO_MENU_DICT = {
                              "cost": 120, "is_veg": True},
         "itm_choco_lava": {"name": "Choco Lava Cake", "preference": 0.4,
                            "cost": 99, "is_veg": True},
-        "itm_pepsi": {"name": "Pepsi", "preference": 0.3, "cost": 57,
-                      "max_quantity": 4, "is_veg": True},
+        "itm_pepsi": {"name": "Pepsi", "preference": 0.3, "cost": 57, "is_veg": True},
     },
     "combos": {
         "cmb_pizza_meal": {

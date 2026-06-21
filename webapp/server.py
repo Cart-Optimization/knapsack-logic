@@ -633,6 +633,20 @@ def coupon_stats():
         return {"branches": 0, "working_coupons": 0, "codes_tracked": 0, "best_discount": 0}
 
 
+@app.get("/api/demo-menu")
+def demo_menu_view():
+    """The bundled sample menu + coupon codes, so the demo can show users exactly
+    what the optimizer is working with."""
+    m = demo_menu()
+    items = sorted(
+        ({"name": i.name, "price": int(min(v.cost for v in i.variants)), "veg": i.is_veg}
+         for i in m.items),
+        key=lambda x: -x["price"])
+    coupons = [{"code": c.id.replace("off_", "").upper(), "desc": c.description}
+               for c in m.coupons]
+    return {"restaurant": DEMO_RESTAURANT, "items": items, "coupons": coupons}
+
+
 # ── order placement (user-initiated, COD-aware) ────────────────────────────────
 
 class PlaceOrderRequest(BaseModel):

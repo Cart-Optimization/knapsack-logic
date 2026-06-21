@@ -166,6 +166,15 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
 .pm-tot em{font-style:normal;color:var(--leaf);font-weight:700;font-size:12px}
 .proof-note{font-size:13px;margin-top:14px;background:#eef6ef;border:1px solid rgba(36,122,74,.25);border-radius:10px;padding:10px 12px;line-height:1.5}
 .proof-ok{font-size:12.5px;color:var(--leaf);font-weight:600;margin-top:10px}
+/* ---- demo sample menu ---- */
+.sm-list{display:flex;flex-direction:column}
+.sm-row{display:flex;align-items:center;gap:8px;font-size:14px;padding:5px 0;border-bottom:1px dashed var(--line)}
+.sm-row:last-child{border-bottom:0}
+.sm-p{margin-left:auto;font-family:"JetBrains Mono",monospace;font-weight:700;color:var(--ink)}
+.sm-coupons{display:flex;flex-direction:column;gap:6px}
+.sm-coupon{font-size:13px;background:var(--paper-2);border:1px solid var(--line-2);border-radius:9px;padding:7px 10px}
+.sm-coupon b{font-family:"JetBrains Mono",monospace;color:var(--flame)}
+.sm-foot{font-size:12.5px;color:var(--ink-2);margin-top:12px;line-height:1.5}
 .cta-ghost{display:inline-block;margin:12px 0 0 14px;background:none;border:1.5px solid var(--ink);color:var(--ink);font-weight:700;font-size:15px;padding:13px 22px;border-radius:12px;cursor:pointer}
 .cta-ghost:hover{border-color:var(--flame);color:var(--flame)}
 .demobar{background:#fff4e0;border:1px solid #f0d49a;color:#7a531a;border-radius:12px;padding:11px 14px;font-size:13px;margin-bottom:16px;line-height:1.5}
@@ -280,9 +289,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
         <div class="eyebrow">Best value, found for you</div>
         <h1>Eat better<br>for <em>exactly</em><br>your budget.</h1>
         <p>Tell us a number. We build carts on your Swiggy, hunt every coupon that could apply, and hand you the highest-value order that lands just under budget — coupons auto-discovered, never typed.</p>
-        <a class="cta" href="/login">Connect Swiggy →</a>
+        <a class="cta" href="/login" onclick="return connectSwiggy(event)">Connect Swiggy →</a>
         <button class="cta-ghost" onclick="startDemo()">Try the demo — no login →</button>
-        <div class="swiggy-note">We sign you into your own Swiggy account and build real carts on it. If Swiggy login isn't available (e.g. on the hosted site — pending builder-program access), you'll drop straight into the live demo: same engine, sample menu.</div>
+        <div class="swiggy-note"><b>Run locally</b> and this logs into your own Swiggy account to build real carts. On the <b>hosted site</b>, Swiggy only allows whitelisted apps (whitelisting in progress), so it opens the live demo instead — same engine, sample menu.</div>
         <div class="tiny">We only ever place an order on your explicit confirmation.</div>
       </div>
       <div class="hero-preview" aria-hidden="true">
@@ -363,6 +372,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;heigh
           </div>
         </div>
 
+        <div id="sampleMenu" class="hidden"></div>
         <div id="result"></div>
       </main>
     </div>
@@ -405,6 +415,32 @@ function startDemo(){
   $('budgetPanel').classList.remove('hidden');
   $('budgetPanel').scrollIntoView({behavior:'smooth',block:'start'});
   loadStats();
+  loadSampleMenu();
+}
+
+function connectSwiggy(e){
+  const local = ['localhost','127.0.0.1','0.0.0.0'].includes(location.hostname);
+  if(local) return true;          // follow href → /login (real Swiggy login works locally)
+  if(e) e.preventDefault();
+  startDemo();                     // hosted: Swiggy only allows whitelisted apps → open the demo
+  return false;
+}
+
+async function loadSampleMenu(){
+  try{
+    const m = await fetch('/api/demo-menu').then(r=>r.json());
+    const el=$('sampleMenu'); if(!el) return;
+    const items = m.items.map(i=>`<div class="sm-row">${vegDot(i.veg)}<span>${esc(i.name)}</span><span class="sm-p">₹${i.price}</span></div>`).join('');
+    const coupons = m.coupons.map(c=>`<div class="sm-coupon"><b>${esc(c.code)}</b> — ${esc(c.desc)}</div>`).join('');
+    el.innerHTML = `<div class="panel sm">
+      <p class="label">Sample menu · ${esc(m.restaurant)}</p>
+      <div class="sm-list">${items}</div>
+      <p class="label" style="margin-top:14px">Coupons the engine can use</p>
+      <div class="sm-coupons">${coupons}</div>
+      <p class="sm-foot">Set a budget on the left and hit <b>Find my best cart</b> — the optimizer picks the best combo and applies whichever coupon wins.</p>
+    </div>`;
+    el.classList.remove('hidden');
+  }catch(e){}
 }
 
 async function boot(){
